@@ -1,0 +1,37 @@
+name: Release
+
+on:
+  workflow_dispatch:
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+
+      - run: npm run build
+
+      # Install the Wavedash CLI
+      - name: Install Wavedash CLI
+        run: |
+          curl -fsSL https://wavedash.com/cli/install.sh | bash
+          echo "$HOME/.wavedash/bin" >> "$GITHUB_PATH"
+
+      # Upload the build to Wavedash.
+      # WAVEDASH_TOKEN is read automatically by the CLI — no login step needed.
+      # wavedash.toml in the repo root tells the CLI which game/channel to target.
+      #
+      # NOTE: uploading does NOT make this build live. After this step succeeds,
+      # go to the Wavedash Developer Portal and manually publish the build.
+      - name: Upload build to Wavedash
+        run: wavedash build push
+        env:
+          WAVEDASH_TOKEN: ${{ secrets.WAVEDASH_TOKEN }}
