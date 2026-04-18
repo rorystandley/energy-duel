@@ -7,7 +7,7 @@ A neon, simultaneous turn-based strategy game built for **[Gamedev.js Jam 2026](
 ## Play
 
 - **Wavedash:** https://wavedash.com/games/energy-duel
-- **Itch.io:** [ADD LINK]
+- **Itch.io:** https://rorystandley.itch.io/energy-duel
 - **Repository:** https://github.com/rorystandley/energy-duel
 
 ---
