@@ -1648,11 +1648,11 @@ export class GameScene extends Phaser.Scene {
     const panelX = (GAME_WIDTH - panelWidth) / 2;
     const panelY = 80;
     const panelCenterX = GAME_WIDTH / 2;
-    const topCardY = panelY + 198;
+    const topCardY = panelY + 178;
     const topCardWidth = 254;
-    const topCardHeight = 182;
-    const bottomCardY = topCardY + topCardHeight + 18;
-    const bottomCardHeight = 134;
+    const topCardHeight = 164;
+    const bottomCardY = topCardY + topCardHeight + 14;
+    const bottomCardHeight = 120;
     const depth = 20;
     const isWelcome = this.rulesOverlayMode === "welcome";
     const priorityOwner = this.robotName(this.round.priorityOwner).toUpperCase();
@@ -1824,7 +1824,7 @@ export class GameScene extends Phaser.Scene {
           "Entering the same tile or crossing paths causes a clash.",
           `${priorityOwner} wins clashes this round and claims the tile.`,
           "If a node is there, the winner claims it too.",
-          "The loser is stunned and skips the next step.",
+          "Loser is stunned: only their next move becomes WAIT.",
         ],
         depth + 1,
         TRON_THEME.rivalAccent,
