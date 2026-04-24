@@ -81,6 +81,7 @@ interface ExecutionStepVisual {
 }
 
 type VolumeSliderKind = "music" | "sfx";
+type RulesOverlayMode = "welcome" | "rules";
 
 interface ActiveVolumeSlider {
   kind: VolumeSliderKind;
@@ -154,7 +155,7 @@ export class GameScene extends Phaser.Scene {
   private readonly audio = new AudioManager();
   private activeVolumeSlider?: ActiveVolumeSlider;
   private debugMatchEndPresetIndex = 0;
-  private onboardingVisible = false;
+  private rulesOverlayMode: RulesOverlayMode | null = null;
   private inputRegistered = false;
 
   constructor() {
@@ -164,10 +165,10 @@ export class GameScene extends Phaser.Scene {
   create(): void {
     this.match = createInitialMatch();
     this.round = createRoundState(this.match.currentRound);
-    this.onboardingVisible = !this.hasSeenOnboarding();
+    this.rulesOverlayMode = this.hasSeenOnboarding() ? null : "welcome";
 
     this.drawBackdrop();
-    if (this.onboardingVisible) {
+    if (this.rulesOverlayVisible) {
       this.registerOnboardingInput();
     } else {
       this.registerInput();
@@ -212,6 +213,8 @@ export class GameScene extends Phaser.Scene {
     keyboard.on("keydown-ENTER", () => this.startExecution());
     keyboard.on("keydown-R", () => this.replayMatch());
     keyboard.on("keydown-N", () => this.replayMatch());
+    keyboard.on("keydown-H", () => this.toggleRulesOverlay());
+    keyboard.on("keydown-ESC", () => this.hideRulesOverlay());
 
     if (ENABLE_MATCH_END_DEBUG) {
       keyboard.on("keydown-M", () => this.debugJumpToMatchComplete());
@@ -250,18 +253,48 @@ export class GameScene extends Phaser.Scene {
   private registerOnboardingInput(): void {
     const keyboard = this.input.keyboard;
 
-    keyboard?.once("keydown", () => this.dismissOnboarding());
+    keyboard?.once("keydown", () => this.hideRulesOverlay());
   }
 
-  private dismissOnboarding(): void {
-    if (!this.onboardingVisible) {
+  private get rulesOverlayVisible(): boolean {
+    return this.rulesOverlayMode !== null;
+  }
+
+  private showRulesOverlay(mode: RulesOverlayMode): void {
+    if (mode === "rules" && this.match.status === "executing") {
       return;
     }
 
-    this.onboardingVisible = false;
-    this.rememberOnboardingSeen();
-    this.registerInput();
-    this.render();
+    this.stopVolumeSliderDrag();
+    this.rulesOverlayMode = mode;
+    this.renderIfNotExecuting();
+  }
+
+  private hideRulesOverlay(): void {
+    if (!this.rulesOverlayVisible) {
+      return;
+    }
+
+    const shouldRememberOnboarding = this.rulesOverlayMode === "welcome";
+
+    this.stopVolumeSliderDrag();
+    this.rulesOverlayMode = null;
+
+    if (shouldRememberOnboarding) {
+      this.rememberOnboardingSeen();
+      this.registerInput();
+    }
+
+    this.renderIfNotExecuting();
+  }
+
+  private toggleRulesOverlay(): void {
+    if (this.rulesOverlayVisible) {
+      this.hideRulesOverlay();
+      return;
+    }
+
+    this.showRulesOverlay("rules");
   }
 
   private hasSeenOnboarding(): boolean {
@@ -281,7 +314,7 @@ export class GameScene extends Phaser.Scene {
   }
 
   private addMove(move: Move): void {
-    if (this.onboardingVisible || this.match.status !== "queuing") {
+    if (this.rulesOverlayVisible || this.match.status !== "queuing") {
       return;
     }
 
@@ -296,7 +329,7 @@ export class GameScene extends Phaser.Scene {
   }
 
   private undoMove(): void {
-    if (this.onboardingVisible || this.match.status !== "queuing") {
+    if (this.rulesOverlayVisible || this.match.status !== "queuing") {
       return;
     }
 
@@ -305,7 +338,7 @@ export class GameScene extends Phaser.Scene {
   }
 
   private clearQueue(): void {
-    if (this.onboardingVisible || this.match.status !== "queuing") {
+    if (this.rulesOverlayVisible || this.match.status !== "queuing") {
       return;
     }
 
@@ -315,7 +348,7 @@ export class GameScene extends Phaser.Scene {
 
   private startExecution(): void {
     if (
-      this.onboardingVisible ||
+      this.rulesOverlayVisible ||
       this.match.status !== "queuing" ||
       !isPlayerQueueReady(this.round)
     ) {
@@ -337,7 +370,7 @@ export class GameScene extends Phaser.Scene {
   }
 
   private replayMatch(): void {
-    if (this.onboardingVisible || this.match.status !== "match-complete") {
+    if (this.rulesOverlayVisible || this.match.status !== "match-complete") {
       return;
     }
 
@@ -345,7 +378,7 @@ export class GameScene extends Phaser.Scene {
   }
 
   private debugJumpToMatchComplete(): void {
-    if (this.onboardingVisible) {
+    if (this.rulesOverlayVisible) {
       return;
     }
 
@@ -772,8 +805,8 @@ export class GameScene extends Phaser.Scene {
     this.drawExecutionStepBadge();
     this.drawHud();
 
-    if (this.onboardingVisible) {
-      this.drawOnboardingOverlay();
+    if (this.rulesOverlayVisible) {
+      this.drawRulesOverlay();
     }
   }
 
@@ -1598,6 +1631,7 @@ export class GameScene extends Phaser.Scene {
     this.drawGameTitle();
     this.drawMatchReadout();
     this.drawAudioSettings();
+    this.drawRulesAccess();
 
     if (this.match.status === "match-complete") {
       this.drawMatchCompleteOverlay();
@@ -1608,13 +1642,26 @@ export class GameScene extends Phaser.Scene {
     this.drawControls();
   }
 
-  private drawOnboardingOverlay(): void {
-    const panelWidth = 560;
-    const panelHeight = 430;
+  private drawRulesOverlay(): void {
+    const panelWidth = 640;
+    const panelHeight = 560;
     const panelX = (GAME_WIDTH - panelWidth) / 2;
-    const panelY = (GAME_HEIGHT - panelHeight) / 2;
+    const panelY = 80;
     const panelCenterX = GAME_WIDTH / 2;
+    const topCardY = panelY + 198;
+    const topCardWidth = 254;
+    const topCardHeight = 182;
+    const bottomCardY = topCardY + topCardHeight + 18;
+    const bottomCardHeight = 134;
     const depth = 20;
+    const isWelcome = this.rulesOverlayMode === "welcome";
+    const priorityOwner = this.robotName(this.round.priorityOwner).toUpperCase();
+    const priorityColor = this.robotColor(this.round.priorityOwner);
+    const statusLabel = isWelcome ? "WELCOME TO THE GRID" : "TACTICAL REFERENCE";
+    const statusHint = isWelcome
+      ? "Press any key to start. Press H later to reopen the guide."
+      : "Press H or ESC any time to close this guide.";
+    const closeLabel = isWelcome ? "START MATCH" : "CLOSE RULES";
     const fadeTargets: Array<Phaser.GameObjects.Graphics | Phaser.GameObjects.Text> =
       [];
     const shade = this.track(this.add.graphics());
@@ -1625,7 +1672,7 @@ export class GameScene extends Phaser.Scene {
     fadeTargets.push(shade, glow, panel, scanlines);
 
     shade.setDepth(depth);
-    shade.fillStyle(0x020712, 0.72);
+    shade.fillStyle(0x01040a, 0.84);
     shade.fillRect(0, 0, GAME_WIDTH, GAME_HEIGHT);
 
     glow.setDepth(depth + 0.1);
@@ -1648,7 +1695,7 @@ export class GameScene extends Phaser.Scene {
     );
 
     panel.setDepth(depth + 0.2);
-    panel.fillStyle(TRON_THEME.panelFill, 0.92);
+    panel.fillStyle(0x03111d, 0.97);
     panel.fillRoundedRect(panelX, panelY, panelWidth, panelHeight, 8);
     panel.lineStyle(4, TRON_THEME.player, 0.86);
     panel.strokeRoundedRect(panelX, panelY, panelWidth, panelHeight, 8);
@@ -1660,7 +1707,7 @@ export class GameScene extends Phaser.Scene {
       panelHeight - 28,
       5,
     );
-    this.drawOnboardingCornerBrackets(
+    this.drawOverlayCornerBrackets(
       panel,
       panelX,
       panelY,
@@ -1669,21 +1716,21 @@ export class GameScene extends Phaser.Scene {
     );
 
     scanlines.setDepth(depth + 0.3);
-    scanlines.lineStyle(1, TRON_THEME.grid, 0.1);
+    scanlines.lineStyle(1, TRON_THEME.grid, 0.05);
     for (let y = panelY + 24; y < panelY + panelHeight - 20; y += 10) {
       scanlines.lineBetween(panelX + 18, y, panelX + panelWidth - 18, y);
     }
     scanlines.lineStyle(1, TRON_THEME.rivalAccent, 0.16);
     scanlines.lineBetween(
       panelX + 24,
-      panelY + 92,
+      panelY + 108,
       panelX + panelWidth - 24,
-      panelY + 92,
+      panelY + 108,
     );
 
-    const title = this.drawOnboardingText(
+    const title = this.drawOverlayText(
       panelCenterX,
-      panelY + 42,
+      panelY + 36,
       GAME_TITLE.toUpperCase(),
       {
         color: TRON_THEME.textPrimary,
@@ -1694,39 +1741,95 @@ export class GameScene extends Phaser.Scene {
         glowBlur: 18,
       },
     );
-    const intro = this.drawOnboardingText(
+    const subtitle = this.drawOverlayText(
       panelCenterX,
-      panelY + 112,
-      [
-        "Queue 8 moves.",
-        "Both machines execute at the same time.",
-        "Claim energy nodes.",
-        "Avoid collisions.",
-        "Score the most after 5 rounds.",
-      ],
-      {
-        color: TRON_THEME.textPrimary,
-        fontSize: "18px",
-        fontStyle: "700",
-        depth: depth + 1,
-        lineSpacing: 8,
-      },
-    );
-    const footer = this.drawOnboardingText(
-      panelCenterX,
-      panelY + panelHeight - 58,
-      "Press any key",
+      panelY + 92,
+      statusLabel,
       {
         color: TRON_THEME.textAmber,
-        fontSize: "15px",
-        fontStyle: "800",
+        fontSize: "14px",
+        fontStyle: "900",
         depth: depth + 1,
         glow: TRON_THEME.textAmber,
         glowBlur: 10,
       },
     );
-
-    fadeTargets.push(title, intro, footer);
+    const priority = this.drawOverlayText(
+      panelCenterX,
+      panelY + 126,
+      `ROUND ${this.match.currentRound} PRIORITY: ${priorityOwner}`,
+      {
+        color: priorityColor,
+        fontSize: "15px",
+        fontStyle: "800",
+        depth: depth + 1,
+        glow: priorityColor,
+        glowBlur: 12,
+      },
+    );
+    const hint = this.drawOverlayText(
+      panelCenterX,
+      panelY + 154,
+      statusHint,
+      {
+        color: TRON_THEME.textMuted,
+        fontSize: "14px",
+        fontStyle: "700",
+        depth: depth + 1,
+        glow: TRON_THEME.textMuted,
+        glowBlur: 8,
+      },
+    );
+    fadeTargets.push(title, subtitle, priority, hint);
+    fadeTargets.push(
+      ...this.drawRulesCard(
+        panelX + 36,
+        topCardY,
+        topCardWidth,
+        topCardHeight,
+        "ROUND FLOW",
+        [
+          `Queue ${MOVES_PER_ROUND} moves.`,
+          "Both robots reveal together.",
+          "Small nodes are worth 1.",
+          "Large nodes are worth 3.",
+          `Highest score after ${this.match.totalRounds} rounds wins.`,
+        ],
+        depth + 1,
+        TRON_THEME.player,
+      ),
+      ...this.drawRulesCard(
+        panelX + panelWidth - 36 - topCardWidth,
+        topCardY,
+        topCardWidth,
+        topCardHeight,
+        "CONTROLS",
+        [
+          "Arrow keys or WASD move.",
+          "Space queues WAIT.",
+          "Backspace undoes a move.",
+          "C or Delete clears the queue.",
+          "Enter executes. H opens this guide.",
+        ],
+        depth + 1,
+        TRON_THEME.grid,
+      ),
+      ...this.drawRulesCard(
+        panelX + 36,
+        bottomCardY,
+        panelWidth - 72,
+        bottomCardHeight,
+        "COLLISIONS",
+        [
+          "Entering the same tile or crossing paths causes a clash.",
+          `${priorityOwner} wins clashes this round and claims the tile.`,
+          "If a node is there, the winner claims it too.",
+          "The loser is stunned and skips the next step.",
+        ],
+        depth + 1,
+        TRON_THEME.rivalAccent,
+      ),
+    );
 
     for (const target of fadeTargets) {
       target.setAlpha(0);
@@ -1748,7 +1851,7 @@ export class GameScene extends Phaser.Scene {
       ease: "Sine.easeInOut",
     });
     this.tweens.add({
-      targets: [title, footer],
+      targets: [title, subtitle, priority],
       alpha: 0.82,
       duration: 1350,
       delay: ONBOARDING_FADE_MS,
@@ -1766,15 +1869,132 @@ export class GameScene extends Phaser.Scene {
       ease: "Stepped",
     });
 
-    const hitArea = this.track(
-      this.add.zone(0, 0, GAME_WIDTH, GAME_HEIGHT).setOrigin(0),
+    const footerDivider = this.track(this.add.graphics());
+    footerDivider.setDepth(depth + 1.1);
+    footerDivider.lineStyle(1, TRON_THEME.grid, 0.18);
+    footerDivider.lineBetween(
+      panelX + 36,
+      panelY + panelHeight - 68,
+      panelX + panelWidth - 36,
+      panelY + panelHeight - 68,
     );
-    hitArea.setDepth(depth + 2);
-    hitArea.setInteractive({ useHandCursor: true });
-    hitArea.on("pointerdown", () => this.dismissOnboarding());
+
+    this.drawButton(
+      panelCenterX - 98,
+      panelY + panelHeight - 44,
+      196,
+      38,
+      closeLabel,
+      true,
+      () => this.hideRulesOverlay(),
+      depth + 1.4,
+    );
   }
 
-  private drawOnboardingCornerBrackets(
+  private drawRulesCard(
+    x: number,
+    y: number,
+    width: number,
+    height: number,
+    title: string,
+    lines: string[],
+    depth: number,
+    accent: number,
+  ): Array<Phaser.GameObjects.Graphics | Phaser.GameObjects.Text> {
+    const card = this.track(this.add.graphics());
+    card.setDepth(depth - 0.1);
+    card.fillStyle(0x041523, 0.96);
+    card.fillRoundedRect(x, y, width, height, 8);
+    card.lineStyle(4, accent, 0.08);
+    card.strokeRoundedRect(x - 1, y - 1, width + 2, height + 2, 9);
+    card.lineStyle(1, accent, 0.56);
+    card.strokeRoundedRect(x, y, width, height, 8);
+    card.lineStyle(1, TRON_THEME.grid, 0.16);
+    card.strokeRoundedRect(x + 10, y + 10, width - 20, height - 20, 5);
+    card.lineStyle(1, accent, 0.28);
+    card.lineBetween(x + 16, y + 34, x + width - 16, y + 34);
+    card.lineStyle(1, TRON_THEME.grid, 0.14);
+    card.lineBetween(x + 16, y + 37, x + width * 0.62, y + 37);
+
+    const titleText = this.drawOverlayText(x + 16, y + 12, title, {
+      color: this.cssColor(accent),
+      fontSize: "12px",
+      fontStyle: "900",
+      depth,
+      glow: this.cssColor(accent),
+      glowBlur: 10,
+      originX: 0,
+    });
+    const bodyText = this.drawOverlayText(
+      x + 16,
+      y + 46,
+      lines.map((line) => `- ${line}`).join("\n"),
+      {
+        color: TRON_THEME.textPrimary,
+        fontSize: "12px",
+        fontStyle: "700",
+        depth,
+        lineSpacing: 2,
+        originX: 0,
+        wordWrapWidth: width - 32,
+      },
+    );
+
+    return [card, titleText, bodyText];
+  }
+
+  private drawRulesAccess(): void {
+    const x = LEFT_PANEL_X + 4;
+    const y = BOARD_ORIGIN.y + 492;
+    const width = SIDE_PANEL_WIDTH - 24;
+    const height = 82;
+    const depth = 0.2;
+    const canOpenRules = this.match.status !== "executing";
+    const g = this.track(this.add.graphics());
+
+    g.setDepth(depth);
+    g.fillStyle(TRON_THEME.panelFill, 0.38);
+    g.fillRoundedRect(x - 5, y - 8, width + 10, height, 7);
+    g.lineStyle(5, TRON_THEME.grid, 0.05);
+    g.strokeRoundedRect(x - 6, y - 9, width + 12, height + 2, 8);
+    g.lineStyle(1, TRON_THEME.grid, 0.4);
+    g.strokeRoundedRect(x - 5, y - 8, width + 10, height, 7);
+    g.lineStyle(1, TRON_THEME.player, 0.18);
+    g.lineBetween(x + 6, y + 25, x + width - 6, y + 25);
+
+    this.drawDepthText(x + 2, y + 2, "RULES", {
+      color: TRON_THEME.textMuted,
+      fontSize: "13px",
+      fontStyle: "900",
+      depth: depth + 0.1,
+    });
+    this.drawDepthText(
+      x + 2,
+      y + 28,
+      canOpenRules
+        ? "Press H for guide."
+        : "Guide reopens after execution.",
+      {
+        color: canOpenRules ? TRON_THEME.textPrimary : TRON_THEME.textGhost,
+        fontSize: "9px",
+        fontStyle: "700",
+        depth: depth + 0.1,
+        lineSpacing: 4,
+      },
+    );
+    this.drawButton(
+      x + 8,
+      y + 48,
+      width - 16,
+      22,
+      "VIEW RULES",
+      canOpenRules,
+      () => this.showRulesOverlay("rules"),
+      depth + 0.1,
+    );
+  }
+
+  private drawOverlayCornerBrackets(
     g: Phaser.GameObjects.Graphics,
     x: number,
     y: number,
@@ -1794,7 +2014,7 @@ export class GameScene extends Phaser.Scene {
     g.lineBetween(x + width, y + height, x + width, y + height - corner);
   }
 
-  private drawOnboardingText(
+  private drawOverlayText(
     x: number,
     y: number,
     text: string | string[],
@@ -1806,19 +2026,27 @@ export class GameScene extends Phaser.Scene {
       glow?: string;
       glowBlur?: number;
       lineSpacing?: number;
+      originX?: number;
+      wordWrapWidth?: number;
     },
   ): Phaser.GameObjects.Text {
     const textObject = this.track(
       this.add
         .text(x, y, text, {
-          align: "center",
+          align: (options.originX ?? 0.5) === 0 ? "left" : "center",
           color: options.color,
           fontFamily: TRON_THEME.fontFamily,
           fontSize: options.fontSize,
           fontStyle: options.fontStyle,
           lineSpacing: options.lineSpacing,
+          wordWrap: options.wordWrapWidth
+            ? {
+                width: options.wordWrapWidth,
+                useAdvancedWrap: true,
+              }
+            : undefined,
         })
-        .setOrigin(0.5, 0),
+        .setOrigin(options.originX ?? 0.5, 0),
     );
 
     textObject.setDepth(options.depth);
@@ -2327,7 +2555,7 @@ export class GameScene extends Phaser.Scene {
   }
 
   private drawControls(): void {
-    const canEdit = !this.onboardingVisible && this.match.status === "queuing";
+    const canEdit = !this.rulesOverlayVisible && this.match.status === "queuing";
     const canExecute = canEdit && isPlayerQueueReady(this.round);
     const x = RIGHT_PANEL_X;
     const y = BOARD_ORIGIN.y + 264;
