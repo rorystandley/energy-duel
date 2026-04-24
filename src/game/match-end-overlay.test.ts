@@ -28,8 +28,8 @@ describe("match-complete scene overlay smoke", () => {
     const overlay = createMatchCompleteOverlayModel(completeMatch(12, 8));
 
     expect(overlay.scoreRows).toEqual([
-      { label: "PLAYER SCORE", value: "12", tone: "player" },
-      { label: "RIVAL SCORE", value: "8", tone: "rival" },
+      { label: "YOUR SCORE", value: "12", tone: "player" },
+      { label: "ENEMY SCORE", value: "8", tone: "rival" },
       { label: "ROUND REACHED", value: "5 / 5", tone: "neutral" },
     ]);
   });

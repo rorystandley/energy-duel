@@ -1100,7 +1100,7 @@ export class GameScene extends Phaser.Scene {
 
     const label = this.track(
       this.add
-        .text(badgeX, badgeY, "P", {
+        .text(badgeX, badgeY, "Y", {
           color: "#061018",
           fontFamily: TRON_THEME.fontFamily,
           fontSize: "10px",
@@ -1149,6 +1149,8 @@ export class GameScene extends Phaser.Scene {
     const innerPanel = this.robotInnerPanelPoints(profile.innerScale);
     const glow = this.add.graphics();
     const body = this.add.graphics();
+    const visual = this.add.container(0, 0, [glow, body]);
+    const badge = this.createRobotOwnerBadge(robot, tile);
 
     glow.setBlendMode(Phaser.BlendModes.ADD);
     glow.fillStyle(primary, stunned ? 0.04 : 0.065);
@@ -1205,12 +1207,51 @@ export class GameScene extends Phaser.Scene {
       body.lineBetween(13, -13, -13, 13);
     }
 
+    visual.setRotation(this.robotFacingRotation(robot, facing));
+
     const container = this.track(
-      this.add.container(center.x, center.y, [glow, body]),
+      this.add.container(center.x, center.y, [visual, ...badge]),
     );
     container.setDepth(3);
-    container.setRotation(this.robotFacingRotation(robot, facing));
     return container;
+  }
+
+  private createRobotOwnerBadge(
+    robot: RobotId,
+    tile: TilePosition,
+  ): Array<Phaser.GameObjects.Graphics | Phaser.GameObjects.Text> {
+    const label = this.robotName(robot).toUpperCase();
+    const color = this.robotThemeColor(robot);
+    const accent = this.robotAccentColor(robot);
+    const width = robot === "player" ? 46 : 62;
+    const height = 18;
+    const y = tile.row === 0 ? 38 : -38;
+    const bg = this.add.graphics();
+
+    bg.fillStyle(ROBOT_PANEL_DARK, 0.88);
+    bg.fillRoundedRect(-width / 2, y - height / 2, width, height, 5);
+    bg.lineStyle(4, color, 0.1);
+    bg.strokeRoundedRect(
+      -width / 2 - 1,
+      y - height / 2 - 1,
+      width + 2,
+      height + 2,
+      6,
+    );
+    bg.lineStyle(1, accent, 0.88);
+    bg.strokeRoundedRect(-width / 2, y - height / 2, width, height, 5);
+
+    const text = this.add
+      .text(0, y, label, {
+        color: TRON_THEME.textPrimary,
+        fontFamily: TRON_THEME.fontFamily,
+        fontSize: "10px",
+        fontStyle: "900",
+      })
+      .setOrigin(0.5);
+    this.applyTextGlow(text, this.cssColor(color), 8);
+
+    return [bg, text];
   }
 
   private robotHullPoints(scale = 1): Phaser.Math.Vector2[] {
@@ -1650,12 +1691,14 @@ export class GameScene extends Phaser.Scene {
     const panelCenterX = GAME_WIDTH / 2;
     const topCardY = panelY + 178;
     const topCardWidth = 254;
-    const topCardHeight = 164;
+    const topCardHeight = 176;
     const bottomCardY = topCardY + topCardHeight + 14;
     const bottomCardHeight = 120;
     const depth = 20;
     const isWelcome = this.rulesOverlayMode === "welcome";
     const priorityOwner = this.robotName(this.round.priorityOwner).toUpperCase();
+    const priorityClashLine =
+      `This round: ${priorityOwner} wins clashes and takes the tile/node.`;
     const priorityColor = this.robotColor(this.round.priorityOwner);
     const statusLabel = isWelcome ? "WELCOME TO THE GRID" : "TACTICAL REFERENCE";
     const statusHint = isWelcome
@@ -1789,6 +1832,7 @@ export class GameScene extends Phaser.Scene {
         topCardHeight,
         "ROUND FLOW",
         [
+          "You are cyan; enemy is orange.",
           `Queue ${MOVES_PER_ROUND} moves.`,
           "Both robots reveal together.",
           "Small nodes are worth 1.",
@@ -1821,9 +1865,9 @@ export class GameScene extends Phaser.Scene {
         bottomCardHeight,
         "COLLISIONS",
         [
-          "Entering the same tile or crossing paths causes a clash.",
-          `${priorityOwner} wins clashes this round and claims the tile.`,
-          "If a node is there, the winner claims it too.",
+          "Same tile or crossing paths causes a clash.",
+          "Collision priority swaps each round.",
+          priorityClashLine,
           "Loser is stunned: only their next move becomes WAIT.",
         ],
         depth + 1,
@@ -2172,7 +2216,7 @@ export class GameScene extends Phaser.Scene {
       this.drawReadoutLine(
         readoutX,
         readoutY + readoutGap + 8,
-        `PLAYER: ${this.match.playerScore}`,
+        `YOU: ${this.match.playerScore}`,
         this.robotColor("player"),
         "18px",
         "800",
@@ -2180,7 +2224,7 @@ export class GameScene extends Phaser.Scene {
       this.drawReadoutLine(
         readoutX,
         readoutY + readoutGap * 2 + 8,
-        `RIVAL: ${this.match.rivalScore}`,
+        `ENEMY: ${this.match.rivalScore}`,
         this.robotColor("rival"),
         "18px",
         "800",
@@ -2213,16 +2257,16 @@ export class GameScene extends Phaser.Scene {
     this.drawReadoutLine(
       readoutX,
       readoutY + readoutGap * 3 + 20,
-      `PLAYER: ${this.match.playerScore}${playerDelta > 0 ? ` +${playerDelta}` : ""}`,
-      playerDelta > 0 ? this.robotColor("player") : TRON_THEME.textMuted,
+      `YOU: ${this.match.playerScore}${playerDelta > 0 ? ` +${playerDelta}` : ""}`,
+      this.robotColor("player"),
       "17px",
       playerDelta > 0 ? "800" : "500",
     );
     this.drawReadoutLine(
       readoutX,
       readoutY + readoutGap * 4 + 20,
-      `RIVAL: ${this.match.rivalScore}${rivalDelta > 0 ? ` +${rivalDelta}` : ""}`,
-      rivalDelta > 0 ? this.robotColor("rival") : TRON_THEME.textMuted,
+      `ENEMY: ${this.match.rivalScore}${rivalDelta > 0 ? ` +${rivalDelta}` : ""}`,
+      this.robotColor("rival"),
       "17px",
       rivalDelta > 0 ? "800" : "500",
     );
@@ -2480,11 +2524,11 @@ export class GameScene extends Phaser.Scene {
         this.add.text(
           x,
           y,
-          `QUEUE ${this.round.playerQueue.length}/${MOVES_PER_ROUND}`,
+          `YOUR QUEUE ${this.round.playerQueue.length}/${MOVES_PER_ROUND}`,
           {
             color: TRON_THEME.textPrimary,
             fontFamily: TRON_THEME.fontFamily,
-            fontSize: "15px",
+            fontSize: "14px",
             fontStyle: "800",
           },
         ),
@@ -2877,7 +2921,7 @@ export class GameScene extends Phaser.Scene {
   }
 
   private robotName(robot: RobotId): string {
-    return robot === "player" ? "Player" : "Rival";
+    return robot === "player" ? "You" : "Enemy";
   }
 
   private robotColor(robot: RobotId): string {

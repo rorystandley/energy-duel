@@ -26,12 +26,12 @@ export function createMatchCompleteOverlayModel(
     resultSubtitle: result.subtitle,
     scoreRows: [
       {
-        label: "PLAYER SCORE",
+        label: "YOUR SCORE",
         value: String(match.playerScore),
         tone: "player",
       },
       {
-        label: "RIVAL SCORE",
+        label: "ENEMY SCORE",
         value: String(match.rivalScore),
         tone: "rival",
       },
@@ -55,14 +55,14 @@ function getFinalResultCopy(
   if (playerScore > rivalScore) {
     return {
       label: "Victory",
-      subtitle: "Player claimed the high score",
+      subtitle: "You claimed the high score",
     };
   }
 
   if (rivalScore > playerScore) {
     return {
       label: "Defeat",
-      subtitle: "Rival claimed the high score",
+      subtitle: "Enemy claimed the high score",
     };
   }
 
