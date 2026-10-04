@@ -1,8 +1,5 @@
-import {
-  MOVES_PER_ROUND,
-  START_TILES,
-  TOTAL_ROUNDS,
-} from "./constants";
+import { START_TILES } from "./constants";
+import { getModeRules, getMovesForRound } from "./match-rules";
 import {
   addBlockersForRound,
   copyBoard,
@@ -13,6 +10,7 @@ import { createRoundPickups } from "./pickups";
 import { planRivalTurn } from "./robot-ai";
 import type {
   BoardState,
+  MatchMode,
   MatchState,
   MatchStats,
   Move,
@@ -26,15 +24,17 @@ import type {
 type RoundRobotTiles = Partial<Record<RobotId, TilePosition>>;
 
 interface RoundSetupOptions {
+  mode?: MatchMode;
   previousBoard?: BoardState;
   previousPickups?: Pickup[];
   robotTiles?: RoundRobotTiles;
 }
 
-export function createInitialMatch(): MatchState {
+export function createInitialMatch(mode: MatchMode = "standard"): MatchState {
   return {
+    mode,
     currentRound: 1,
-    totalRounds: TOTAL_ROUNDS,
+    totalRounds: getModeRules(mode).totalRounds,
     playerScore: 0,
     rivalScore: 0,
     status: "queuing",
@@ -52,6 +52,14 @@ function createInitialMatchStats(): MatchStats {
     playerCollisionsWon: 0,
     rivalCollisionsWon: 0,
   };
+}
+
+export function skipGuidedIntro(match: MatchState): MatchState {
+  return match.mode === "guided" ? createInitialMatch("standard") : match;
+}
+
+export function createRestartMatch(_match: MatchState): MatchState {
+  return createInitialMatch("standard");
 }
 
 export function createRoundState(
@@ -96,6 +104,7 @@ export function createRoundState(
     playerQueue: [],
     rivalQueue: [],
     rivalMood: null,
+    maxSteps: getMovesForRound(options.mode ?? "standard", round),
     currentExecutionStep: 0,
     stun: {
       player: 0,
@@ -109,7 +118,7 @@ export function getRoundPriorityOwner(round: number): RoundPriorityOwner {
 }
 
 export function canQueueMove(round: RoundState): boolean {
-  return round.playerQueue.length < MOVES_PER_ROUND;
+  return round.playerQueue.length < round.maxSteps;
 }
 
 export function queuePlayerMove(round: RoundState, move: Move): RoundState {
@@ -138,7 +147,7 @@ export function clearPlayerQueue(round: RoundState): RoundState {
 }
 
 export function isPlayerQueueReady(round: RoundState): boolean {
-  return round.playerQueue.length === MOVES_PER_ROUND;
+  return round.playerQueue.length === round.maxSteps;
 }
 
 export function lockRoundQueues(round: RoundState): RoundState {
@@ -146,6 +155,7 @@ export function lockRoundQueues(round: RoundState): RoundState {
     playerTile: round.player.tile,
     priorityOwner: round.priorityOwner,
     seed: round.round,
+    steps: round.maxSteps,
   });
 
   return {

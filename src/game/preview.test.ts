@@ -20,6 +20,7 @@ describe("move preview", () => {
       playerQueue: ["right", "right"],
       rivalQueue: ["left", "left"],
       rivalMood: "aggressive",
+      maxSteps: 8,
       currentExecutionStep: 0,
       stun: { player: 0, rival: 0 },
     };
@@ -35,6 +36,28 @@ describe("move preview", () => {
     expect(preview).not.toHaveProperty("rivalQueue");
     expect(preview).not.toHaveProperty("rivalMood");
     expect(preview).not.toHaveProperty("collisions");
+  });
+
+  it("never previews beyond the round's step count", () => {
+    const round: RoundState = {
+      round: 1,
+      priorityOwner: "player",
+      board: OPEN_BOARD,
+      pickups: [],
+      player: { id: "player", tile: tile(2, 0) },
+      rival: { id: "rival", tile: tile(7, 7) },
+      playerQueue: ["right", "right", "right", "right", "right", "right"],
+      rivalQueue: [],
+      rivalMood: null,
+      maxSteps: 4,
+      currentExecutionStep: 0,
+      stun: { player: 0, rival: 0 },
+    };
+
+    const preview = createMovePreview(round);
+
+    expect(preview?.committedSteps).toBe(4);
+    expect(preview?.playerPath).toHaveLength(5);
   });
 });
 

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
-import { resolveNextStep } from "./round-resolution";
+import { createRoundState, lockRoundQueues } from "./match-flow";
+import { resolveNextStep, resolveRound } from "./round-resolution";
 import type { BoardState, Move, RoundState, TilePosition } from "./types";
 
 const OPEN_BOARD: BoardState = {
@@ -119,6 +120,30 @@ describe("round resolution stun timing", () => {
   });
 });
 
+describe("round length", () => {
+  it("executes exactly four steps in the guided first round", () => {
+    const round = lockRoundQueues({
+      ...createRoundState(1, { mode: "guided" }),
+      playerQueue: moves("up", "up", "up", "up"),
+    });
+    const resolution = resolveRound(round);
+
+    expect(resolution.steps).toHaveLength(4);
+    expect(resolution.finalRound.currentExecutionStep).toBe(4);
+    expect(() => resolveNextStep(resolution.finalRound)).toThrow();
+  });
+
+  it("executes eight steps in Standard and guided round two", () => {
+    for (const round of [
+      createRoundState(1),
+      createRoundState(2, { mode: "guided" }),
+    ]) {
+      const locked = lockRoundQueues({ ...round, playerQueue: moves("wait", "wait", "wait", "wait", "wait", "wait", "wait", "wait") });
+      expect(resolveRound(locked).steps).toHaveLength(8);
+    }
+  });
+});
+
 function createForcedCollisionRound(): RoundState {
   return {
     round: 1,
@@ -136,6 +161,7 @@ function createForcedCollisionRound(): RoundState {
     playerQueue: moves("right", "up", "wait"),
     rivalQueue: moves("left", "left", "left"),
     rivalMood: null,
+    maxSteps: 8,
     currentExecutionStep: 0,
     stun: {
       player: 0,
@@ -161,6 +187,7 @@ function createForcedSwapCollisionRound(): RoundState {
     playerQueue: moves("right", "up", "wait"),
     rivalQueue: moves("left", "right", "right"),
     rivalMood: null,
+    maxSteps: 8,
     currentExecutionStep: 0,
     stun: {
       player: 0,
@@ -186,6 +213,7 @@ function createForcedPlayerLossRound(): RoundState {
     playerQueue: moves("right", "right", "right"),
     rivalQueue: moves("left", "up", "wait"),
     rivalMood: null,
+    maxSteps: 8,
     currentExecutionStep: 0,
     stun: {
       player: 0,

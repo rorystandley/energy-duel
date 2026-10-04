@@ -4,6 +4,8 @@ export type RobotId = "player" | "rival";
 
 export type RoundPriorityOwner = RobotId;
 
+export type MatchMode = "standard" | "guided";
+
 export type RivalMood = "aggressive" | "greedy" | "safe";
 
 export type PickupValue = 1 | 3;
@@ -53,6 +55,7 @@ export interface ExecutionRobotState extends RobotState {
 export type StunState = Record<RobotId, number>;
 
 export interface MatchState {
+  mode: MatchMode;
   currentRound: number;
   totalRounds: number;
   playerScore: number;
@@ -81,6 +84,7 @@ export interface RoundState {
   playerQueue: Move[];
   rivalQueue: Move[];
   rivalMood: RivalMood | null;
+  maxSteps: number;
   currentExecutionStep: number;
   stun: StunState;
 }
