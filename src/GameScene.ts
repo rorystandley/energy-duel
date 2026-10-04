@@ -24,6 +24,8 @@ import {
   startNextRound,
 } from "./game/match-flow";
 import { createMatchCompleteOverlayModel } from "./game/match-end-overlay";
+import { deriveRoundSummary } from "./game/round-summary";
+import type { RoundSummary } from "./game/round-summary";
 import { getGuideCoach } from "./game/guide-coach";
 import { computeLayout, isCompact } from "./game/layout";
 import type { CompactLayout, GameLayout, Rect } from "./game/layout";
@@ -173,6 +175,9 @@ export class GameScene extends Phaser.Scene {
   private compactPanel: "audio" | null = null;
   private rulesPage = 0;
   private lastLayoutKey = "";
+  private roundSteps: StepResult[] = [];
+  private roundStartPickups: Pickup[] = [];
+  private roundSummary: RoundSummary | null = null;
   private backdrop?: Phaser.GameObjects.Graphics;
 
   constructor() {
@@ -269,13 +274,23 @@ export class GameScene extends Phaser.Scene {
     ];
 
     for (const [eventName, move] of moveBindings) {
-      keyboard.on(eventName, () => this.addMove(move));
+      keyboard.on(eventName, () => {
+        if (move === "wait" && this.match.status === "round-complete") {
+          this.continueFromSummary();
+          return;
+        }
+
+        this.addMove(move);
+      });
     }
 
     keyboard.on("keydown-BACKSPACE", () => this.undoMove());
     keyboard.on("keydown-DELETE", () => this.clearQueue());
     keyboard.on("keydown-C", () => this.clearQueue());
-    keyboard.on("keydown-ENTER", () => this.startExecution());
+    keyboard.on("keydown-ENTER", () => {
+      this.continueFromSummary();
+      this.startExecution();
+    });
     keyboard.on("keydown-R", () => this.replayMatch());
     keyboard.on("keydown-N", () => this.replayMatch());
     keyboard.on("keydown-K", () => this.skipToStandardMatch());
@@ -371,6 +386,7 @@ export class GameScene extends Phaser.Scene {
 
   private startMatch(mode: MatchMode): void {
     this.stopExecutionEffects();
+    this.roundSummary = null;
     this.match = createInitialMatch(mode);
     this.round = createRoundState(this.match.currentRound, { mode });
     this.lastCollisionWinner = null;
@@ -472,6 +488,12 @@ export class GameScene extends Phaser.Scene {
     }
 
     this.round = lockRoundQueues(this.round);
+    this.roundSteps = [];
+    this.roundStartPickups = this.round.pickups.map((pickup) => ({
+      ...pickup,
+      tile: { ...pickup.tile },
+    }));
+    this.roundSummary = null;
     this.lastCollisionWinner = null;
     this.logFirstReveal();
     this.match = {
@@ -519,6 +541,7 @@ export class GameScene extends Phaser.Scene {
     const rivalQueue = Array<Move>(this.round.maxSteps).fill("wait");
 
     this.debugMatchEndPresetIndex += 1;
+    this.roundSummary = null;
     this.stopExecutionEffects();
     this.round = {
       ...this.createDebugFinalRoundState(finalRound),
@@ -558,6 +581,7 @@ export class GameScene extends Phaser.Scene {
     stepVisual.collectedPickups = collectedPickups;
 
     this.round = resolution.round;
+    this.roundSteps.push(resolution.step);
     this.match = applyStepScore(
       this.match,
       resolution.step.playerScoreDelta,
@@ -588,11 +612,23 @@ export class GameScene extends Phaser.Scene {
       recordGuideOutcome(this.safeStorage(), "completed");
     }
 
-    this.render();
-
     if (this.match.status === "round-complete") {
-      this.time.delayedCall(1200, () => this.beginNextRound());
+      this.roundSummary = deriveRoundSummary({
+        round: this.match.currentRound,
+        totalRounds: this.match.totalRounds,
+        steps: this.roundSteps,
+        startPickups: this.roundStartPickups,
+      });
+      this.render();
     }
+  }
+
+  private continueFromSummary(): void {
+    if (this.rulesOverlayVisible || this.match.status !== "round-complete") {
+      return;
+    }
+
+    this.beginNextRound();
   }
 
   private logStepResult(step: StepResult): void {
@@ -883,6 +919,7 @@ export class GameScene extends Phaser.Scene {
     const playerTile = this.round.player.tile;
     const rivalTile = this.round.rival.tile;
 
+    this.roundSummary = null;
     this.match = startNextRound(this.match);
     this.round = createRoundState(this.match.currentRound, {
       mode: this.match.mode,
@@ -899,6 +936,7 @@ export class GameScene extends Phaser.Scene {
 
   private restartMatch(): void {
     this.stopExecutionEffects();
+    this.roundSummary = null;
     this.match = createRestartMatch(this.match);
     this.round = createRoundState(this.match.currentRound, {
       mode: this.match.mode,
@@ -1888,6 +1926,7 @@ export class GameScene extends Phaser.Scene {
     this.drawControls();
     this.drawGuideSkip();
     this.drawGuideCoach();
+    this.drawRoundSummaryOverlay();
   }
 
   private drawGuideSkip(): void {
@@ -2746,6 +2785,138 @@ export class GameScene extends Phaser.Scene {
     this.activeLayer = undefined;
   }
 
+  private drawRoundSummaryOverlay(): void {
+    const summary = this.roundSummary;
+
+    if (
+      !summary ||
+      this.match.status !== "round-complete" ||
+      this.rulesOverlayVisible
+    ) {
+      return;
+    }
+
+    const panelWidth = 430;
+    const panelHeight = summary.stunNote ? 318 : 280;
+    const compact = this.compact;
+    const overlayScale = compact
+      ? Math.min(1, (compact.width - 24) / panelWidth, (compact.height - 16) / panelHeight)
+      : 1;
+    const panelX = compact
+      ? 0
+      : BOARD_ORIGIN.x + (BOARD_PIXEL_SIZE - panelWidth) / 2;
+    const panelY = compact
+      ? 0
+      : BOARD_ORIGIN.y + (BOARD_PIXEL_SIZE - panelHeight) / 2;
+    const centerX = panelX + panelWidth / 2;
+    const depth = 8;
+    const accent = TRON_THEME.grid;
+    const shade = this.track(this.add.graphics());
+
+    shade.setDepth(depth);
+    shade.fillStyle(0x020712, 0.7);
+
+    if (compact) {
+      shade.fillRect(0, 0, compact.width, compact.height);
+      this.track(this.add.zone(0, 0, compact.width, compact.height).setOrigin(0))
+        .setDepth(depth + 0.05)
+        .setInteractive();
+
+      const layer = this.track(
+        this.add.container(
+          (compact.width - panelWidth * overlayScale) / 2,
+          (compact.height - panelHeight * overlayScale) / 2,
+        ),
+      );
+
+      layer.setScale(overlayScale);
+      layer.setDepth(depth + 0.1);
+      this.activeLayer = layer;
+    } else {
+      shade.fillRect(
+        BOARD_ORIGIN.x - 8,
+        BOARD_ORIGIN.y - 8,
+        BOARD_PIXEL_SIZE + 16,
+        BOARD_PIXEL_SIZE + 16,
+      );
+    }
+
+    const panel = this.track(this.add.graphics());
+
+    panel.setDepth(depth + 0.1);
+    panel.fillStyle(TRON_THEME.panelFill, 0.97);
+    panel.fillRoundedRect(panelX, panelY, panelWidth, panelHeight, 8);
+    panel.lineStyle(3, accent, 0.84);
+    panel.strokeRoundedRect(panelX, panelY, panelWidth, panelHeight, 8);
+
+    this.drawDepthText(centerX, panelY + 34, summary.title, {
+      color: TRON_THEME.textPrimary,
+      fontSize: "24px",
+      fontStyle: "900",
+      originX: 0.5,
+      depth: depth + 1,
+    });
+    this.drawFinalScoreRow(
+      panelX + 52,
+      panelY + 72,
+      "YOU GAINED",
+      `+${summary.playerPoints}`,
+      this.robotColor("player"),
+      depth + 1,
+    );
+    this.drawFinalScoreRow(
+      panelX + 52,
+      panelY + 108,
+      "ENEMY GAINED",
+      `+${summary.rivalPoints}`,
+      this.robotColor("rival"),
+      depth + 1,
+    );
+    this.drawDepthText(centerX, panelY + 152, summary.moment.text, {
+      color:
+        summary.moment.tone === "neutral"
+          ? TRON_THEME.textMuted
+          : this.robotColor(summary.moment.tone),
+      fontSize: "15px",
+      fontStyle: "800",
+      originX: 0.5,
+      depth: depth + 1,
+      wordWrapWidth: panelWidth - 64,
+    });
+
+    if (summary.stunNote) {
+      this.drawDepthText(centerX, panelY + 190, summary.stunNote, {
+        color: TRON_THEME.textMuted,
+        fontSize: "13px",
+        fontStyle: "700",
+        originX: 0.5,
+        depth: depth + 1,
+        wordWrapWidth: panelWidth - 64,
+      });
+    }
+
+    this.drawButton(
+      centerX - 130,
+      panelY + panelHeight - 78,
+      260,
+      46,
+      summary.continueLabel,
+      true,
+      () => this.continueFromSummary(),
+      depth + 1,
+      "15px",
+      true,
+    );
+    this.drawDepthText(centerX, panelY + panelHeight - 24, "Enter / Space / tap", {
+      color: TRON_THEME.textGhost,
+      fontSize: "11px",
+      fontStyle: "700",
+      originX: 0.5,
+      depth: depth + 1,
+    });
+    this.activeLayer = undefined;
+  }
+
   private finalResultStyle(label: FinalResultLabel): {
     color: string;
     accent: number;
@@ -3347,6 +3518,7 @@ export class GameScene extends Phaser.Scene {
       this.drawCompactQueue(c);
       this.drawCompactControls(c, locked);
       this.drawCompactCoach(c, locked);
+      this.drawRoundSummaryOverlay();
     }
 
     this.drawCompactAudioPanel(c);
