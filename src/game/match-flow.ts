@@ -1,5 +1,6 @@
 import { START_TILES } from "./constants";
-import { getModeRules, getMovesForRound } from "./match-rules";
+import { RULES_VERSION, getModeRules, getMovesForRound } from "./match-rules";
+import { createMatchSeed, createSeededRandom, deriveSeed } from "./random";
 import {
   addBlockersForRound,
   copyBoard,
@@ -25,14 +26,25 @@ type RoundRobotTiles = Partial<Record<RobotId, TilePosition>>;
 
 interface RoundSetupOptions {
   mode?: MatchMode;
+  /** Match seed; omit only for throwaway rounds that need no reproduction. */
+  seed?: number;
   previousBoard?: BoardState;
   previousPickups?: Pickup[];
   robotTiles?: RoundRobotTiles;
 }
 
-export function createInitialMatch(mode: MatchMode = "standard"): MatchState {
+export interface MatchOptions {
+  seed?: number;
+}
+
+export function createInitialMatch(
+  mode: MatchMode = "standard",
+  options: MatchOptions = {},
+): MatchState {
   return {
     mode,
+    seed: options.seed ?? createMatchSeed(),
+    rulesVersion: RULES_VERSION,
     currentRound: 1,
     totalRounds: getModeRules(mode).totalRounds,
     playerScore: 0,
@@ -58,8 +70,36 @@ export function skipGuidedIntro(match: MatchState): MatchState {
   return match.mode === "guided" ? createInitialMatch("standard") : match;
 }
 
-export function createRestartMatch(_match: MatchState): MatchState {
-  return createInitialMatch("standard");
+export function createRestartMatch(
+  _match: MatchState,
+  options: MatchOptions = {},
+): MatchState {
+  return createInitialMatch("standard", options);
+}
+
+/** Same board seed and mode as `match`, with every score and choice reset. */
+export function createRematchMatch(match: MatchState): MatchState {
+  return createInitialMatch(match.mode, { seed: match.seed });
+}
+
+/** A fresh-seed match (guided intros become Standard), guaranteed to differ from `match`'s seed. */
+export function createNewBoardMatch(
+  match: MatchState,
+  nextSeed: () => number = createMatchSeed,
+): MatchState {
+  let seed = nextSeed();
+
+  for (let attempt = 0; attempt < 8 && seed === match.seed; attempt += 1) {
+    seed = nextSeed();
+  }
+
+  if (seed === match.seed) {
+    seed = deriveSeed(match.seed, "new-board");
+  }
+
+  return createInitialMatch(match.mode === "guided" ? "standard" : match.mode, {
+    seed,
+  });
 }
 
 export function createRoundState(
@@ -67,6 +107,8 @@ export function createRoundState(
   options: RoundSetupOptions = {},
 ): RoundState {
   const robotTiles = options.robotTiles ?? {};
+  const matchSeed = options.seed ?? createMatchSeed();
+  const random = createSeededRandom(deriveSeed(matchSeed, "round", round));
   const player = {
     id: "player" as RobotId,
     tile: copyTile(robotTiles.player ?? START_TILES.player),
@@ -84,6 +126,7 @@ export function createRoundState(
     occupiedTiles,
     options.previousPickups,
     round,
+    random,
   );
   const board = addBlockersForRound(
     boardBeforeNewBlockers,
@@ -92,10 +135,12 @@ export function createRoundState(
       ...occupiedTiles,
       ...pickups.map((pickup) => pickup.tile),
     ],
+    random,
   );
 
   return {
     round,
+    seed: deriveSeed(matchSeed, "rival", round),
     priorityOwner: getRoundPriorityOwner(round),
     board,
     pickups,
@@ -111,6 +156,23 @@ export function createRoundState(
       rival: 0,
     },
   };
+}
+
+/** Builds the next round from the one just finished, carrying board, pickups and robot tiles. */
+export function createNextRoundState(
+  match: MatchState,
+  previousRound: RoundState,
+): RoundState {
+  return createRoundState(match.currentRound, {
+    mode: match.mode,
+    seed: match.seed,
+    previousBoard: previousRound.board,
+    previousPickups: previousRound.pickups,
+    robotTiles: {
+      player: previousRound.player.tile,
+      rival: previousRound.rival.tile,
+    },
+  });
 }
 
 export function getRoundPriorityOwner(round: number): RoundPriorityOwner {
@@ -154,7 +216,7 @@ export function lockRoundQueues(round: RoundState): RoundState {
   const rivalPlan = planRivalTurn(round.board, round.rival.tile, round.pickups, {
     playerTile: round.player.tile,
     priorityOwner: round.priorityOwner,
-    seed: round.round,
+    seed: round.seed,
     steps: round.maxSteps,
   });
 

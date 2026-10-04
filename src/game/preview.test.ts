@@ -12,6 +12,7 @@ describe("move preview", () => {
   it("exposes only the player's queued path", () => {
     const round: RoundState = {
       round: 1,
+      seed: 0,
       priorityOwner: "player",
       board: OPEN_BOARD,
       pickups: [],
@@ -41,6 +42,7 @@ describe("move preview", () => {
   it("never previews beyond the round's step count", () => {
     const round: RoundState = {
       round: 1,
+      seed: 0,
       priorityOwner: "player",
       board: OPEN_BOARD,
       pickups: [],

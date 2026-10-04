@@ -13,6 +13,9 @@ import {
   applyStepScore,
   clearPlayerQueue,
   createInitialMatch,
+  createNextRoundState,
+  createNewBoardMatch,
+  createRematchMatch,
   createRestartMatch,
   createRoundState,
   finishRound,
@@ -24,6 +27,16 @@ import {
   startNextRound,
 } from "./game/match-flow";
 import { createMatchCompleteOverlayModel } from "./game/match-end-overlay";
+import { findDebugReplay } from "./game/debug-match";
+import { deriveMatchStats, getPickupCollector } from "./game/match-story";
+import {
+  buildReplayFrame,
+  openReplayViewer,
+  restartReplayRound,
+  shiftReplayRound,
+  stepReplayViewer,
+} from "./game/replay-viewer";
+import type { ReplayFrame, ReplayViewState } from "./game/replay-viewer";
 import { deriveRoundSummary } from "./game/round-summary";
 import type { RoundSummary } from "./game/round-summary";
 import { getGuideCoach } from "./game/guide-coach";
@@ -31,10 +44,20 @@ import { computeLayout, isCompact } from "./game/layout";
 import type { CompactLayout, GameLayout, Rect } from "./game/layout";
 import { recordGuideOutcome } from "./game/onboarding-progress";
 import { createMovePreview } from "./game/preview";
+import {
+  createReplay,
+  finalizeReplay,
+  recordReplayRound,
+  type ReplayRecord,
+} from "./game/replay";
 import { resolveNextStep } from "./game/round-resolution";
 import { AudioManager } from "./game/audio-manager";
 import { getPickupStyle, TRON_THEME } from "./game/tron-theme";
-import type { FinalResultLabel, ScoreRowTone } from "./game/match-end-overlay";
+import type {
+  FinalResultLabel,
+  MatchEndActionId,
+  ScoreRowTone,
+} from "./game/match-end-overlay";
 import type {
   MovePreview,
   PreviewPickupClaim,
@@ -98,12 +121,6 @@ interface ActiveVolumeSlider {
   width: number;
 }
 
-interface DebugMatchEndPreset {
-  playerScore: number;
-  rivalScore: number;
-  stats: MatchStats;
-}
-
 interface RobotMachineProfile {
   finReach: number;
   frontReach: number;
@@ -114,45 +131,6 @@ interface RobotMachineProfile {
 
 const ROBOT_CHASSIS_DARK = 0x010713;
 const ROBOT_PANEL_DARK = 0x020a12;
-
-const DEBUG_MATCH_END_PRESETS: DebugMatchEndPreset[] = [
-  {
-    playerScore: 14,
-    rivalScore: 9,
-    stats: {
-      playerPickupsCollected: 8,
-      rivalPickupsCollected: 5,
-      playerThreePointPickupsCollected: 4,
-      rivalThreePointPickupsCollected: 2,
-      playerCollisionsWon: 3,
-      rivalCollisionsWon: 1,
-    },
-  },
-  {
-    playerScore: 7,
-    rivalScore: 13,
-    stats: {
-      playerPickupsCollected: 5,
-      rivalPickupsCollected: 8,
-      playerThreePointPickupsCollected: 1,
-      rivalThreePointPickupsCollected: 4,
-      playerCollisionsWon: 1,
-      rivalCollisionsWon: 3,
-    },
-  },
-  {
-    playerScore: 11,
-    rivalScore: 11,
-    stats: {
-      playerPickupsCollected: 7,
-      rivalPickupsCollected: 7,
-      playerThreePointPickupsCollected: 3,
-      rivalThreePointPickupsCollected: 3,
-      playerCollisionsWon: 2,
-      rivalCollisionsWon: 2,
-    },
-  },
-];
 
 export class GameScene extends Phaser.Scene {
   private match!: MatchState;
@@ -178,6 +156,13 @@ export class GameScene extends Phaser.Scene {
   private roundSteps: StepResult[] = [];
   private roundStartPickups: Pickup[] = [];
   private roundSummary: RoundSummary | null = null;
+  /** Versioned record of the current match; a replay UI will read this later. */
+  private replay!: ReplayRecord;
+  private lockedRound?: RoundState;
+  /** Set while a finished round is being inspected; live match state is never edited by it. */
+  private replayView: ReplayViewState | null = null;
+  private replayFrame: ReplayFrame | null = null;
+  private shareCopied = false;
   private backdrop?: Phaser.GameObjects.Graphics;
 
   constructor() {
@@ -187,7 +172,10 @@ export class GameScene extends Phaser.Scene {
   create(): void {
     this.sceneStartedAt = performance.now();
     this.match = createInitialMatch();
-    this.round = createRoundState(this.match.currentRound);
+    this.round = createRoundState(this.match.currentRound, {
+      seed: this.match.seed,
+    });
+    this.replay = createReplay(this.match);
     this.rulesOverlayMode = this.hasSeenOnboarding() ? null : "welcome";
 
     this.refreshLayout();
@@ -275,6 +263,11 @@ export class GameScene extends Phaser.Scene {
 
     for (const [eventName, move] of moveBindings) {
       keyboard.on(eventName, () => {
+        if (this.replayView) {
+          this.handleReplayKey(move);
+          return;
+        }
+
         if (move === "wait" && this.match.status === "round-complete") {
           this.continueFromSummary();
           return;
@@ -288,14 +281,47 @@ export class GameScene extends Phaser.Scene {
     keyboard.on("keydown-DELETE", () => this.clearQueue());
     keyboard.on("keydown-C", () => this.clearQueue());
     keyboard.on("keydown-ENTER", () => {
+      if (this.replayView) {
+        this.closeReplay();
+        return;
+      }
+
       this.continueFromSummary();
       this.startExecution();
     });
-    keyboard.on("keydown-R", () => this.replayMatch());
-    keyboard.on("keydown-N", () => this.replayMatch());
-    keyboard.on("keydown-K", () => this.skipToStandardMatch());
+    keyboard.on("keydown-R", () => {
+      if (this.match.mode === "guided") {
+        this.startStandardMatch();
+      } else {
+        this.startRematch();
+      }
+    });
+    keyboard.on("keydown-N", () => {
+      if (this.match.mode === "guided") {
+        this.startStandardMatch();
+      } else {
+        this.startNewBoard();
+      }
+    });
+    keyboard.on("keydown-P", () => {
+      if (this.match.status === "match-complete") {
+        this.openReplay("match");
+      } else {
+        this.openReplay("round");
+      }
+    });
+    keyboard.on("keydown-K", () => {
+      if (!this.replayView) {
+        this.skipToStandardMatch();
+      }
+    });
     keyboard.on("keydown-H", () => this.toggleRulesOverlay());
     keyboard.on("keydown-ESC", () => {
+      if (this.replayView && !this.rulesOverlayVisible && !this.compactPanel) {
+        this.closeReplay();
+        return;
+      }
+
       this.closeCompactPanel();
       this.hideRulesOverlay();
     });
@@ -305,6 +331,19 @@ export class GameScene extends Phaser.Scene {
       console.debug(
         "[Energy Duel] debug match-end shortcut enabled: press M to cycle final results.",
       );
+    }
+  }
+
+  /** Arrow/WASD/Space while replaying: left/right step, up/down change round, Space steps on. */
+  private handleReplayKey(move: Move): void {
+    if (move === "left") {
+      this.stepReplay(-1);
+    } else if (move === "right" || move === "wait") {
+      this.stepReplay(1);
+    } else if (move === "up") {
+      this.shiftReplay(-1);
+    } else if (move === "down") {
+      this.shiftReplay(1);
     }
   }
 
@@ -385,10 +424,22 @@ export class GameScene extends Phaser.Scene {
   }
 
   private startMatch(mode: MatchMode): void {
+    this.beginMatch(createInitialMatch(mode));
+  }
+
+  /** Replaces the whole match, including the round, replay record and any open viewer. */
+  private beginMatch(match: MatchState): void {
     this.stopExecutionEffects();
     this.roundSummary = null;
-    this.match = createInitialMatch(mode);
-    this.round = createRoundState(this.match.currentRound, { mode });
+    this.replayView = null;
+    this.shareCopied = false;
+    this.lockedRound = undefined;
+    this.match = match;
+    this.round = createRoundState(match.currentRound, {
+      mode: match.mode,
+      seed: match.seed,
+    });
+    this.replay = createReplay(match);
     this.lastCollisionWinner = null;
     this.render();
   }
@@ -403,13 +454,7 @@ export class GameScene extends Phaser.Scene {
     }
 
     recordGuideOutcome(this.safeStorage(), "skipped");
-    this.stopExecutionEffects();
-    this.match = skipGuidedIntro(this.match);
-    this.round = createRoundState(this.match.currentRound, {
-      mode: this.match.mode,
-    });
-    this.lastCollisionWinner = null;
-    this.render();
+    this.beginMatch(skipGuidedIntro(this.match));
   }
 
   private safeStorage(): Storage | undefined {
@@ -481,6 +526,7 @@ export class GameScene extends Phaser.Scene {
   private startExecution(): void {
     if (
       this.rulesOverlayVisible ||
+      this.replayView ||
       this.match.status !== "queuing" ||
       !isPlayerQueueReady(this.round)
     ) {
@@ -488,6 +534,7 @@ export class GameScene extends Phaser.Scene {
     }
 
     this.round = lockRoundQueues(this.round);
+    this.lockedRound = this.round;
     this.roundSteps = [];
     this.roundStartPickups = this.round.pickups.map((pickup) => ({
       ...pickup,
@@ -519,42 +566,41 @@ export class GameScene extends Phaser.Scene {
     console.info(`[Energy Duel] first reveal ${seconds.toFixed(1)}s after load`);
   }
 
-  private replayMatch(): void {
-    if (this.rulesOverlayVisible || this.match.status !== "match-complete") {
-      return;
-    }
-
-    this.restartMatch();
-  }
-
   private debugJumpToMatchComplete(): void {
     if (this.rulesOverlayVisible) {
       return;
     }
 
-    const preset =
-      DEBUG_MATCH_END_PRESETS[
-        this.debugMatchEndPresetIndex % DEBUG_MATCH_END_PRESETS.length
-      ];
-    const finalRound = this.match.totalRounds;
-    const playerQueue = Array<Move>(this.round.maxSteps).fill("wait");
-    const rivalQueue = Array<Move>(this.round.maxSteps).fill("wait");
+    const outcomes = ["player", "rival", "draw"] as const;
+    const winner = outcomes[this.debugMatchEndPresetIndex % outcomes.length];
+    const mode = this.match.mode;
+    const record = findDebugReplay(mode, winner, 1 + this.debugMatchEndPresetIndex * 97);
 
     this.debugMatchEndPresetIndex += 1;
-    this.roundSummary = null;
+
+    if (!record?.result) {
+      return;
+    }
+
+    const last = record.rounds.length - 1;
+
     this.stopExecutionEffects();
-    this.round = {
-      ...this.createDebugFinalRoundState(finalRound),
-      playerQueue,
-      rivalQueue,
-      currentExecutionStep: this.round.maxSteps,
-    };
+    this.roundSummary = null;
+    this.replayView = null;
+    this.shareCopied = false;
+    this.replay = record;
+    this.round = buildReplayFrame(record, {
+      roundIndex: last,
+      step: record.rounds[last].steps.length,
+      firstRound: 0,
+      lastRound: last,
+    }).round;
     this.match = finishRound({
-      ...createInitialMatch(this.match.mode),
-      currentRound: finalRound,
-      playerScore: preset.playerScore,
-      rivalScore: preset.rivalScore,
-      stats: { ...preset.stats },
+      ...createInitialMatch(mode, { seed: record.seed }),
+      currentRound: record.rounds.length,
+      playerScore: record.result.playerScore,
+      rivalScore: record.result.rivalScore,
+      stats: deriveMatchStats(record),
     });
     this.render();
   }
@@ -608,6 +654,19 @@ export class GameScene extends Phaser.Scene {
     this.audio.setRoundMusicActive(false);
     this.match = finishRound(this.match);
 
+    if (this.lockedRound) {
+      this.replay = recordReplayRound(
+        this.replay,
+        this.lockedRound,
+        this.roundSteps,
+      );
+      this.lockedRound = undefined;
+    }
+
+    if (this.match.status === "match-complete") {
+      this.replay = finalizeReplay(this.replay, this.match);
+    }
+
     if (this.match.status === "match-complete" && this.match.mode === "guided") {
       recordGuideOutcome(this.safeStorage(), "completed");
     }
@@ -619,12 +678,17 @@ export class GameScene extends Phaser.Scene {
         steps: this.roundSteps,
         startPickups: this.roundStartPickups,
       });
-      this.render();
     }
+
+    this.render();
   }
 
   private continueFromSummary(): void {
-    if (this.rulesOverlayVisible || this.match.status !== "round-complete") {
+    if (
+      this.rulesOverlayVisible ||
+      this.replayView ||
+      this.match.status !== "round-complete"
+    ) {
       return;
     }
 
@@ -709,19 +773,7 @@ export class GameScene extends Phaser.Scene {
   }
 
   private getPickupCollector(step: StepResult, pickup: Pickup): RobotId | null {
-    if (step.collision && step.collisionWinner) {
-      return step.collisionWinner;
-    }
-
-    if (step.playerScoreDelta > 0 && sameTile(step.playerTile, pickup.tile)) {
-      return "player";
-    }
-
-    if (step.rivalScoreDelta > 0 && sameTile(step.rivalTile, pickup.tile)) {
-      return "rival";
-    }
-
-    return null;
+    return getPickupCollector(step, pickup);
   }
 
   private addPickupStat(
@@ -916,33 +968,132 @@ export class GameScene extends Phaser.Scene {
       return;
     }
 
-    const playerTile = this.round.player.tile;
-    const rivalTile = this.round.rival.tile;
-
     this.roundSummary = null;
     this.match = startNextRound(this.match);
-    this.round = createRoundState(this.match.currentRound, {
-      mode: this.match.mode,
-      previousBoard: this.round.board,
-      previousPickups: this.round.pickups,
-      robotTiles: {
-        player: playerTile,
-        rival: rivalTile,
-      },
-    });
+    this.round = createNextRoundState(this.match, this.round);
     this.activeStepVisual = undefined;
     this.render();
   }
 
-  private restartMatch(): void {
-    this.stopExecutionEffects();
-    this.roundSummary = null;
-    this.match = createRestartMatch(this.match);
-    this.round = createRoundState(this.match.currentRound, {
-      mode: this.match.mode,
+  private startRematch(): void {
+    if (this.canLeaveMatchEnd()) {
+      this.beginMatch(createRematchMatch(this.match));
+    }
+  }
+
+  private startNewBoard(): void {
+    if (this.canLeaveMatchEnd()) {
+      this.beginMatch(createNewBoardMatch(this.match));
+    }
+  }
+
+  private startStandardMatch(): void {
+    if (this.canLeaveMatchEnd()) {
+      this.beginMatch(createRestartMatch(this.match));
+    }
+  }
+
+  private canLeaveMatchEnd(): boolean {
+    return (
+      !this.rulesOverlayVisible &&
+      this.replayView === null &&
+      this.match.status === "match-complete"
+    );
+  }
+
+  private runMatchEndAction(id: MatchEndActionId): void {
+    switch (id) {
+      case "rematch":
+        this.startRematch();
+        break;
+      case "new-board":
+        this.startNewBoard();
+        break;
+      case "standard":
+        this.startStandardMatch();
+        break;
+      case "replay":
+        this.openReplay("match");
+        break;
+      case "share":
+        void this.copyResult();
+        break;
+    }
+  }
+
+  private openReplay(scope: "round" | "match"): void {
+    if (
+      this.rulesOverlayVisible ||
+      this.replayView ||
+      (this.match.status !== "round-complete" &&
+        this.match.status !== "match-complete")
+    ) {
+      return;
+    }
+
+    const view = openReplayViewer(this.replay, {
+      roundIndex: scope === "round" ? undefined : 0,
+      onlyThisRound: scope === "round",
     });
-    this.lastCollisionWinner = null;
+
+    if (!view) {
+      return;
+    }
+
+    this.replayView = view;
     this.render();
+  }
+
+  private closeReplay(): void {
+    if (!this.replayView) {
+      return;
+    }
+
+    this.replayView = null;
+    this.render();
+  }
+
+  private stepReplay(delta: number): void {
+    if (!this.replayView || this.rulesOverlayVisible) {
+      return;
+    }
+
+    this.replayView = stepReplayViewer(this.replay, this.replayView, delta);
+    this.render();
+  }
+
+  private shiftReplay(delta: number): void {
+    if (!this.replayView || this.rulesOverlayVisible) {
+      return;
+    }
+
+    this.replayView = shiftReplayRound(this.replayView, delta);
+    this.render();
+  }
+
+  private restartReplay(): void {
+    if (!this.replayView || this.rulesOverlayVisible) {
+      return;
+    }
+
+    this.replayView = restartReplayRound(this.replayView);
+    this.render();
+  }
+
+  private async copyResult(): Promise<void> {
+    if (this.match.status !== "match-complete") {
+      return;
+    }
+
+    const { shareText } = createMatchCompleteOverlayModel(this.match, {
+      replay: this.replay,
+    });
+
+    this.shareCopied = await copyToClipboard(shareText);
+
+    if (this.match.status === "match-complete" && !this.replayView) {
+      this.render();
+    }
   }
 
   private stopExecutionEffects(): void {
@@ -953,43 +1104,84 @@ export class GameScene extends Phaser.Scene {
     this.tweens.killAll();
   }
 
-  private createDebugFinalRoundState(finalRound: number): RoundState {
-    const mode = this.match.mode;
-    let debugRound = createRoundState(1, { mode });
-
-    for (let roundNumber = 2; roundNumber <= finalRound; roundNumber += 1) {
-      debugRound = createRoundState(roundNumber, {
-        mode,
-        previousBoard: debugRound.board,
-        previousPickups: debugRound.pickups,
-        robotTiles: {
-          player: debugRound.player.tile,
-          rival: debugRound.rival.tile,
-        },
-      });
-    }
-
-    return debugRound;
-  }
-
   private render(): void {
     this.syncLayout();
     this.clearRenderObjects();
-    const preview =
-      this.match.status === "queuing" ? createMovePreview(this.round) : undefined;
 
-    this.beginBoardLayer();
-    this.drawBoard();
-    this.drawPreviewPaths(preview);
-    this.drawPickups();
-    this.drawPreviewPickupClaims(preview);
-    this.drawRobots();
-    this.activeLayer = undefined;
-    this.drawExecutionStepBadge();
-    this.drawHud();
+    // The viewer draws from a frame derived from the record. Live state is only
+    // swapped out for the synchronous draw below and restored in `finally`, so
+    // nothing the viewer does can change the match.
+    const live = {
+      match: this.match,
+      round: this.round,
+      visual: this.activeStepVisual,
+    };
+    const frame = this.replayView
+      ? buildReplayFrame(this.replay, this.replayView)
+      : null;
 
-    if (this.rulesOverlayVisible) {
-      this.drawRulesOverlay();
+    if (frame) {
+      this.replayFrame = frame;
+      this.match = {
+        ...live.match,
+        currentRound: frame.roundNumber,
+        playerScore: frame.playerScore,
+        rivalScore: frame.rivalScore,
+        status: "round-complete",
+      };
+      this.round = frame.round;
+      this.activeStepVisual = undefined;
+    }
+
+    try {
+      const preview =
+        this.match.status === "queuing" ? createMovePreview(this.round) : undefined;
+
+      this.beginBoardLayer();
+      this.drawBoard();
+      this.drawPreviewPaths(preview);
+      this.drawPickups();
+      this.drawPreviewPickupClaims(preview);
+      this.drawReplayTrails(frame);
+      this.drawRobots();
+      this.activeLayer = undefined;
+      this.drawExecutionStepBadge();
+      this.drawHud();
+
+      if (this.rulesOverlayVisible) {
+        this.drawRulesOverlay();
+      }
+    } finally {
+      this.match = live.match;
+      this.round = live.round;
+      this.activeStepVisual = live.visual;
+      this.replayFrame = null;
+    }
+  }
+
+  private drawReplayTrails(frame: ReplayFrame | null): void {
+    if (!frame) {
+      return;
+    }
+
+    const g = this.track(this.add.graphics());
+
+    g.setDepth(1);
+
+    for (const robot of ["player", "rival"] as const) {
+      const trail = frame.trails[robot];
+      const color = this.robotThemeColor(robot);
+
+      for (let index = 1; index < trail.length; index += 1) {
+        const from = this.previewPoint(trail[index - 1]);
+        const to = this.previewPoint(trail[index]);
+        const latest = index === trail.length - 1;
+
+        g.lineStyle(PREVIEW_LINE_WIDTH + 6, color, latest ? 0.28 : 0.12);
+        g.lineBetween(from.x, from.y, to.x, to.y);
+        g.lineStyle(PREVIEW_LINE_WIDTH, color, latest ? 0.95 : 0.45);
+        g.lineBetween(from.x, from.y, to.x, to.y);
+      }
     }
   }
 
@@ -1917,6 +2109,11 @@ export class GameScene extends Phaser.Scene {
     this.drawAudioSettings();
     this.drawRulesAccess();
 
+    if (this.replayFrame) {
+      this.drawReplayPanel(this.replayFrame);
+      return;
+    }
+
     if (this.match.status === "match-complete") {
       this.drawMatchCompleteOverlay();
       return;
@@ -2670,11 +2867,38 @@ export class GameScene extends Phaser.Scene {
   }
 
   private drawMatchCompleteOverlay(): void {
-    const panelWidth = 430;
-    const panelHeight = 342;
     const compact = this.compact;
+    const wide = compact?.kind === "landscape";
+    const overlay = createMatchCompleteOverlayModel(this.match, {
+      replay: this.replay,
+    });
+    const resultStyle = this.finalResultStyle(overlay.resultLabel);
+    const pad = 26;
+    const buttonH = 44;
+    const buttonGap = 8;
+    const panelWidth = wide
+      ? 620
+      : compact
+        ? Math.min(430, compact.width - 24)
+        : 430;
+    const rowGap = 26;
+    const rowCount = overlay.scoreRows.length + overlay.storyRows.length;
+    const columnWidth = wide ? 330 : panelWidth;
+    const actions = overlay.actions;
+    const stackedActions = wide;
+    const lowerActions = actions.slice(1);
+    // Phones get at most two buttons per row so every label stays readable.
+    const perRow = compact ? 2 : Math.max(1, lowerActions.length);
+    const lowerRows = Math.ceil(lowerActions.length / perRow);
+    const actionsHeight = stackedActions
+      ? actions.length * buttonH + (actions.length - 1) * buttonGap
+      : (1 + lowerRows) * buttonH + lowerRows * buttonGap;
+    const leftHeight = 118 + rowCount * rowGap + 62;
+    const panelHeight = wide
+      ? Math.max(leftHeight, actionsHeight + 48) + 20
+      : leftHeight + actionsHeight + 54;
     const overlayScale = compact
-      ? Math.min(1, (compact.width - 24) / panelWidth, (compact.height - 16) / panelHeight)
+      ? Math.min(1, (compact.width - 16) / panelWidth, (compact.height - 12) / panelHeight)
       : 1;
     const panelX = compact
       ? 0
@@ -2682,10 +2906,7 @@ export class GameScene extends Phaser.Scene {
     const panelY = compact
       ? 0
       : BOARD_ORIGIN.y + (BOARD_PIXEL_SIZE - panelHeight) / 2;
-    const panelCenterX = panelX + panelWidth / 2;
     const depth = 8;
-    const overlay = createMatchCompleteOverlayModel(this.match);
-    const resultStyle = this.finalResultStyle(overlay.resultLabel);
     const shade = this.track(this.add.graphics());
 
     shade.setDepth(depth);
@@ -2735,54 +2956,258 @@ export class GameScene extends Phaser.Scene {
     panel.strokeRoundedRect(panelX, panelY, panelWidth, panelHeight, 8);
     panel.lineStyle(1, TRON_THEME.grid, 0.42);
     panel.strokeRoundedRect(
-      panelX + 12,
-      panelY + 12,
-      panelWidth - 24,
-      panelHeight - 24,
+      panelX + 10,
+      panelY + 10,
+      panelWidth - 20,
+      panelHeight - 20,
       5,
     );
 
-    this.drawDepthText(panelCenterX, panelY + 44, overlay.resultLabel, {
+    const headX = panelX + columnWidth / 2;
+
+    this.drawDepthText(headX, panelY + 26, overlay.resultLabel, {
       color: resultStyle.color,
-      fontSize: "44px",
+      fontSize: "40px",
       fontStyle: "900",
       originX: 0.5,
       depth: depth + 1,
     });
-    this.drawDepthText(panelCenterX, panelY + 88, overlay.resultSubtitle, {
+    this.drawDepthText(headX, panelY + 74, overlay.resultSubtitle, {
       color: TRON_THEME.textMuted,
       fontSize: "14px",
       fontStyle: "800",
       originX: 0.5,
       depth: depth + 1,
+      wordWrapWidth: columnWidth - pad * 2,
     });
 
-    const scoreY = panelY + 132;
-    overlay.scoreRows.forEach((row, index) => {
-      this.drawFinalScoreRow(
-        panelX + 52,
-        scoreY + index * 44,
-        row.label,
-        row.value,
-        this.scoreRowColor(row.tone),
+    const rows = [...overlay.scoreRows, ...overlay.storyRows];
+    const rowX = panelX + pad;
+    const rowRight = panelX + columnWidth - pad;
+    let rowY = panelY + 108;
+
+    rows.forEach((row, index) => {
+      if (index === overlay.scoreRows.length) {
+        const rule = this.track(this.add.graphics());
+
+        rule.setDepth(depth + 1);
+        rule.lineStyle(1, TRON_THEME.grid, 0.32);
+        rule.lineBetween(rowX, rowY + 3, rowRight, rowY + 3);
+        rowY += 8;
+      }
+
+      const major = index < overlay.scoreRows.length;
+
+      this.drawDepthText(rowX, rowY + (major ? 3 : 2), row.label, {
+        color: TRON_THEME.textMuted,
+        fontSize: "13px",
+        fontStyle: "700",
+        depth: depth + 1,
+      });
+      this.drawDepthText(rowRight, rowY, row.value, {
+        color: this.scoreRowColor(row.tone),
+        fontSize: major ? "20px" : "15px",
+        fontStyle: "900",
+        originX: 1,
+        depth: depth + 1,
+      }).setOrigin(1, 0);
+      rowY += rowGap;
+    });
+
+    this.drawDepthText(rowX, rowY + 8, overlay.nextTarget, {
+      color: TRON_THEME.textPrimary,
+      fontSize: "13px",
+      fontStyle: "700",
+      depth: depth + 1,
+      wordWrapWidth: columnWidth - pad * 2,
+    });
+
+    const shareLabel = (id: MatchEndActionId, label: string) =>
+      id === "share" && this.shareCopied ? "COPIED" : label;
+    const runAction = (id: MatchEndActionId) => () => this.runMatchEndAction(id);
+
+    if (stackedActions) {
+      const actionX = panelX + columnWidth + 8;
+      const actionW = panelWidth - columnWidth - 8 - pad;
+      let actionY = panelY + 26;
+
+      actions.forEach((action, index) => {
+        this.drawButton(
+          actionX,
+          actionY,
+          actionW,
+          buttonH,
+          shareLabel(action.id, action.label),
+          true,
+          runAction(action.id),
+          depth + 1,
+          "14px",
+          index === 0,
+        );
+        actionY += buttonH + buttonGap;
+      });
+      this.drawDepthText(actionX, actionY + 2, overlay.shareDisclaimer, {
+        color: TRON_THEME.textMuted,
+        fontSize: "12px",
+        fontStyle: "700",
+        depth: depth + 1,
+        wordWrapWidth: actionW,
+      });
+    } else {
+      const innerW = panelWidth - pad * 2;
+      const firstY = panelY + leftHeight + 6;
+      const [first] = actions;
+
+      this.drawButton(
+        panelX + pad,
+        firstY,
+        innerW,
+        buttonH,
+        first.label,
+        true,
+        runAction(first.id),
         depth + 1,
+        "15px",
+        true,
       );
+
+      lowerActions.forEach((action, index) => {
+        const rowIndex = Math.floor(index / perRow);
+        const inRow = Math.min(perRow, lowerActions.length - rowIndex * perRow);
+        const lowerW = (innerW - buttonGap * (inRow - 1)) / inRow;
+
+        this.drawButton(
+          panelX + pad + (index % perRow) * (lowerW + buttonGap),
+          firstY + (rowIndex + 1) * (buttonH + buttonGap),
+          lowerW,
+          buttonH,
+          shareLabel(action.id, action.label),
+          true,
+          runAction(action.id),
+          depth + 1,
+          inRow > 2 ? "12px" : "13px",
+        );
+      });
+      this.drawDepthText(
+        panelX + panelWidth / 2,
+        firstY + actionsHeight + 8,
+        overlay.shareDisclaimer,
+        {
+          color: TRON_THEME.textMuted,
+          fontSize: "12px",
+          fontStyle: "700",
+          originX: 0.5,
+          depth: depth + 1,
+        },
+      );
+    }
+
+    this.activeLayer = undefined;
+  }
+
+  private replayRegion(): Rect {
+    const compact = this.compact;
+
+    if (!compact) {
+      return {
+        x: RIGHT_PANEL_X,
+        y: BOARD_ORIGIN.y,
+        w: SIDE_PANEL_WIDTH,
+        h: BOARD_PIXEL_SIZE,
+      };
+    }
+
+    const area = compact.queue.area;
+    const bottom =
+      compact.kind === "landscape" ? compact.height - 8 : compact.height - 8;
+
+    return { x: area.x, y: area.y, w: area.w, h: bottom - area.y };
+  }
+
+  private drawReplayPanel(frame: ReplayFrame): void {
+    const view = this.replayView;
+
+    if (!view) {
+      return;
+    }
+
+    const compact = this.compact;
+    const region = this.replayRegion();
+    const enabled = !this.rulesOverlayVisible;
+    const buttonH = compact ? 46 : 34;
+    const gap = compact ? 8 : 7;
+    const font = compact ? 14 : 13;
+    const multiRound = view.firstRound !== view.lastRound;
+    const atStart = frame.step === 0;
+    const atEnd = frame.step === frame.stepCount;
+    const roundIndex = view.roundIndex;
+    const threeAcross = multiRound && region.w >= 300 && region.h < 300;
+    const rowCount = threeAcross ? 2 : multiRound ? 3 : 2;
+    const buttonsH = rowCount * buttonH + (rowCount - 1) * gap;
+    const buttonsY = region.y + region.h - buttonsH;
+    const left = region.x;
+
+    this.compactText(
+      left,
+      region.y,
+      `REPLAY  ROUND ${frame.roundNumber}`,
+      TRON_THEME.textPrimary,
+      compact ? 15 : 14,
+      { depth: 0.3 },
+    );
+    this.compactText(
+      left,
+      region.y + (compact ? 22 : 24),
+      frame.step === 0 ? "START" : `STEP ${frame.step} / ${frame.stepCount}`,
+      this.cssColor(TRON_THEME.grid),
+      font,
+      { depth: 0.3 },
+    );
+
+    const textTop = region.y + (compact ? 44 : 52);
+    const textRoom = buttonsY - gap - textTop;
+    const lineHeight = font + 5;
+    const maxLines = Math.max(1, Math.floor(textRoom / lineHeight));
+    const lines = frame.narration.slice(0, maxLines);
+
+    lines.forEach((line, index) => {
+      const tone = line.startsWith("You")
+        ? this.robotColor("player")
+        : line.startsWith("Enemy")
+          ? this.robotColor("rival")
+          : TRON_THEME.textMuted;
+      this.compactText(left, textTop + index * lineHeight, line, tone, font - 1, {
+        weight: "700",
+        wrap: region.w,
+        depth: 0.3,
+      });
     });
 
-    if (overlay.statLines.length > 0) {
-      this.drawFinalStats(panelX + 52, panelY + 246, overlay.statLines, depth + 1);
+    const halfW = (region.w - gap) / 2;
+    const row = (index: number) => buttonsY + index * (buttonH + gap);
+    const label = compact ? "13px" : "12px";
+
+    this.drawButton(left, row(0), halfW, buttonH, "< STEP", enabled && !atStart, () => this.stepReplay(-1), 0.4, label);
+    this.drawButton(left + halfW + gap, row(0), halfW, buttonH, "STEP >", enabled && !atEnd, () => this.stepReplay(1), 0.4, label, true);
+
+    if (threeAcross) {
+      const third = (region.w - gap * 2) / 3;
+
+      this.drawButton(left, row(1), third, buttonH, "< RND", enabled && roundIndex > view.firstRound, () => this.shiftReplay(-1), 0.4, label);
+      this.drawButton(left + third + gap, row(1), third, buttonH, "RND >", enabled && roundIndex < view.lastRound, () => this.shiftReplay(1), 0.4, label);
+      this.drawButton(left + (third + gap) * 2, row(1), third, buttonH, "EXIT", enabled, () => this.closeReplay(), 0.4, label, true);
+      return;
     }
-    this.drawButton(
-      panelCenterX - 110,
-      panelY + panelHeight - 54,
-      220,
-      40,
-      this.match.mode === "guided" ? "START STANDARD MATCH" : "NEW MATCH",
-      true,
-      () => this.replayMatch(),
-      depth + 1,
-    );
-    this.activeLayer = undefined;
+
+    if (multiRound) {
+      this.drawButton(left, row(1), halfW, buttonH, "< ROUND", enabled && roundIndex > view.firstRound, () => this.shiftReplay(-1), 0.4, label);
+      this.drawButton(left + halfW + gap, row(1), halfW, buttonH, "ROUND >", enabled && roundIndex < view.lastRound, () => this.shiftReplay(1), 0.4, label);
+      this.drawButton(left, row(2), region.w, buttonH, "EXIT REPLAY", enabled, () => this.closeReplay(), 0.4, label, true);
+      return;
+    }
+
+    this.drawButton(left, row(1), halfW, buttonH, "RESTART", enabled && !atStart, () => this.restartReplay(), 0.4, label);
+    this.drawButton(left + halfW + gap, row(1), halfW, buttonH, "EXIT", enabled, () => this.closeReplay(), 0.4, label, true);
   }
 
   private drawRoundSummaryOverlay(): void {
@@ -2797,7 +3222,7 @@ export class GameScene extends Phaser.Scene {
     }
 
     const panelWidth = 430;
-    const panelHeight = summary.stunNote ? 318 : 280;
+    const panelHeight = (summary.stunNote ? 318 : 280) + 52;
     const compact = this.compact;
     const overlayScale = compact
       ? Math.min(1, (compact.width - 24) / panelWidth, (compact.height - 16) / panelHeight)
@@ -2897,7 +3322,7 @@ export class GameScene extends Phaser.Scene {
 
     this.drawButton(
       centerX - 130,
-      panelY + panelHeight - 78,
+      panelY + panelHeight - 130,
       260,
       46,
       summary.continueLabel,
@@ -2907,7 +3332,18 @@ export class GameScene extends Phaser.Scene {
       "15px",
       true,
     );
-    this.drawDepthText(centerX, panelY + panelHeight - 24, "Enter / Space / tap", {
+    this.drawButton(
+      centerX - 130,
+      panelY + panelHeight - 78,
+      260,
+      44,
+      "WATCH ROUND REPLAY",
+      true,
+      () => this.openReplay("round"),
+      depth + 1,
+      "14px",
+    );
+    this.drawDepthText(centerX, panelY + panelHeight - 24, "Enter / Space continue  |  P replay", {
       color: TRON_THEME.textGhost,
       fontSize: "11px",
       fontStyle: "700",
@@ -2960,21 +3396,6 @@ export class GameScene extends Phaser.Scene {
       fontSize: "24px",
       fontStyle: "900",
       originX: 1,
-      depth,
-    });
-  }
-
-  private drawFinalStats(
-    x: number,
-    y: number,
-    lines: string[],
-    depth: number,
-  ): void {
-    this.drawDepthText(x, y, lines, {
-      color: TRON_THEME.textPrimary,
-      fontSize: "15px",
-      fontStyle: "700",
-      lineSpacing: 9,
       depth,
     });
   }
@@ -3169,18 +3590,6 @@ export class GameScene extends Phaser.Scene {
       canExecute,
       () => this.startExecution(),
     );
-
-    if (this.match.status === "match-complete") {
-      this.drawButton(
-        x,
-        y + (h + gap) * 5 + 26,
-        SIDE_PANEL_WIDTH,
-        h,
-        "NEW MATCH",
-        true,
-        () => this.replayMatch(),
-      );
-    }
   }
 
   private drawAudioSettings(): void {
@@ -3512,7 +3921,9 @@ export class GameScene extends Phaser.Scene {
     this.drawCompactStatus(c, landscape);
     this.drawCompactMenu(c, locked);
 
-    if (this.match.status === "match-complete") {
+    if (this.replayFrame) {
+      this.drawReplayPanel(this.replayFrame);
+    } else if (this.match.status === "match-complete") {
       this.drawMatchCompleteOverlay();
     } else {
       this.drawCompactQueue(c);
@@ -4162,5 +4573,33 @@ export class GameScene extends Phaser.Scene {
   private turnRulesPage(delta: number): void {
     this.rulesPage = Math.max(0, this.rulesPage + delta);
     this.render();
+  }
+}
+
+/** Copies text, falling back to a hidden textarea where the async clipboard is blocked (e.g. some iframes). */
+async function copyToClipboard(text: string): Promise<boolean> {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {
+    // fall through to the legacy path
+  }
+
+  try {
+    const field = document.createElement("textarea");
+
+    field.value = text;
+    field.setAttribute("readonly", "");
+    field.style.position = "fixed";
+    field.style.opacity = "0";
+    document.body.appendChild(field);
+    field.select();
+
+    const copied = document.execCommand("copy");
+
+    document.body.removeChild(field);
+    return copied;
+  } catch {
+    return false;
   }
 }

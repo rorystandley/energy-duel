@@ -56,6 +56,9 @@ export type StunState = Record<RobotId, number>;
 
 export interface MatchState {
   mode: MatchMode;
+  /** Uint32 seed every random decision in the match is derived from. */
+  seed: number;
+  rulesVersion: number;
   currentRound: number;
   totalRounds: number;
   playerScore: number;
@@ -76,6 +79,8 @@ export interface MatchStats {
 
 export interface RoundState {
   round: number;
+  /** Seed for this round's rival planning, derived from the match seed. */
+  seed: number;
   priorityOwner: RoundPriorityOwner;
   board: BoardState;
   pickups: Pickup[];

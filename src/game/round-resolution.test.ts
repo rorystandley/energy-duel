@@ -147,6 +147,7 @@ describe("round length", () => {
 function createForcedCollisionRound(): RoundState {
   return {
     round: 1,
+    seed: 0,
     priorityOwner: "player",
     board: OPEN_BOARD,
     pickups: [],
@@ -173,6 +174,7 @@ function createForcedCollisionRound(): RoundState {
 function createForcedSwapCollisionRound(): RoundState {
   return {
     round: 1,
+    seed: 0,
     priorityOwner: "player",
     board: OPEN_BOARD,
     pickups: [],
@@ -199,6 +201,7 @@ function createForcedSwapCollisionRound(): RoundState {
 function createForcedPlayerLossRound(): RoundState {
   return {
     round: 2,
+    seed: 0,
     priorityOwner: "rival",
     board: OPEN_BOARD,
     pickups: [],

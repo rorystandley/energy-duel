@@ -4,6 +4,7 @@ import {
   BOARD_SIZE,
   CELL_SIZE,
 } from "./constants";
+import { shuffle, type RandomSource } from "./random";
 import type { BoardState, Move, PixelPosition, TilePosition } from "./types";
 
 export function createInitialBoard(): BoardState {
@@ -24,6 +25,7 @@ export function addBlockersForRound(
   board: BoardState,
   round: number,
   reservedTiles: TilePosition[] = [],
+  random: RandomSource,
 ): BoardState {
   const nextBoard = copyBoard(board);
   const blockersToAdd = getBlockersToAddForRound(round, nextBoard.blockers.length);
@@ -32,7 +34,7 @@ export function addBlockersForRound(
     return nextBoard;
   }
 
-  const candidates = shuffleTiles(listOpenTiles(nextBoard, reservedTiles));
+  const candidates = shuffle(listOpenTiles(nextBoard, reservedTiles), random);
 
   if (candidates.length < blockersToAdd) {
     throw new Error(`Unable to add ${blockersToAdd} blockers for round ${round}.`);
@@ -137,17 +139,4 @@ export function listOpenTiles(
   }
 
   return openTiles;
-}
-
-function shuffleTiles(tiles: TilePosition[]): TilePosition[] {
-  const shuffled = tiles.map(copyTile);
-
-  for (let index = shuffled.length - 1; index > 0; index -= 1) {
-    const swapIndex = Math.floor(Math.random() * (index + 1));
-    const current = shuffled[index];
-    shuffled[index] = shuffled[swapIndex];
-    shuffled[swapIndex] = current;
-  }
-
-  return shuffled;
 }

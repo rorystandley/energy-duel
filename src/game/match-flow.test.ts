@@ -3,6 +3,8 @@ import { describe, expect, it } from "vitest";
 import {
   canQueueMove,
   createInitialMatch,
+  createNewBoardMatch,
+  createRematchMatch,
   createRestartMatch,
   createRoundState,
   finishRound,
@@ -105,7 +107,10 @@ describe("match flow", () => {
   it("skips from the guide to a fresh Standard match", () => {
     const mid = { ...createInitialMatch("guided"), playerScore: 3, currentRound: 2 };
     const skipped = skipGuidedIntro(mid);
-    expect(skipped).toEqual(createInitialMatch("standard"));
+    expect(skipped).toEqual(
+      createInitialMatch("standard", { seed: skipped.seed }),
+    );
+    expect(skipped.seed).not.toBe(mid.seed);
   });
 
   it("leaves a Standard match untouched when asked to skip the guide", () => {
@@ -115,7 +120,67 @@ describe("match flow", () => {
 
   it("restarts into Standard after a guided duel", () => {
     const done = finishRound({ ...createInitialMatch("guided"), currentRound: 2 });
-    expect(createRestartMatch(done)).toEqual(createInitialMatch("standard"));
+    const restarted = createRestartMatch(done);
+    expect(restarted).toEqual(
+      createInitialMatch("standard", { seed: restarted.seed }),
+    );
     expect(createRestartMatch(createInitialMatch("standard")).mode).toBe("standard");
+  });
+});
+
+describe("rematch and new board", () => {
+  const finished = finishRound({
+    ...createInitialMatch("standard", { seed: 31337 }),
+    currentRound: 5,
+    playerScore: 11,
+    rivalScore: 4,
+  });
+
+  it("reuses the seed and mode with scores and choices reset", () => {
+    const rematch = createRematchMatch(finished);
+
+    expect(rematch.seed).toBe(31337);
+    expect(rematch.rulesVersion).toBe(finished.rulesVersion);
+    expect(rematch).toEqual(createInitialMatch("standard", { seed: 31337 }));
+    expect(rematch.playerScore).toBe(0);
+    expect(rematch.status).toBe("queuing");
+  });
+
+  it("starts the rematch on the identical board while later rounds stay free", () => {
+    const original = createRoundState(1, { seed: finished.seed });
+    const again = createRoundState(1, { seed: createRematchMatch(finished).seed });
+
+    expect(again).toEqual(original);
+  });
+
+  it("generates a different seed for a new board", () => {
+    const board = createNewBoardMatch(finished);
+
+    expect(board.seed).not.toBe(finished.seed);
+    expect(board.playerScore).toBe(0);
+    expect(createRoundState(1, { seed: board.seed }).pickups).not.toEqual(
+      createRoundState(1, { seed: finished.seed }).pickups,
+    );
+  });
+
+  it("never hands back the old seed, even if the source repeats it", () => {
+    const repeating = createNewBoardMatch(finished, () => finished.seed);
+    const retried = createNewBoardMatch(
+      finished,
+      (() => {
+        const seeds = [finished.seed, 99];
+        return () => seeds.shift() ?? 99;
+      })(),
+    );
+
+    expect(repeating.seed).not.toBe(finished.seed);
+    expect(retried.seed).toBe(99);
+  });
+
+  it("moves a finished guided duel onto a new Standard board", () => {
+    const guided = finishRound({ ...createInitialMatch("guided"), currentRound: 2 });
+
+    expect(createNewBoardMatch(guided).mode).toBe("standard");
+    expect(createRematchMatch(guided).mode).toBe("guided");
   });
 });
