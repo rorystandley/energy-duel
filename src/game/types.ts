@@ -4,7 +4,7 @@ export type RobotId = "player" | "rival";
 
 export type RoundPriorityOwner = RobotId;
 
-export type MatchMode = "standard" | "guided";
+export type MatchMode = "standard" | "guided" | "daily";
 
 export type RivalMood = "aggressive" | "greedy" | "safe";
 
@@ -59,6 +59,8 @@ export interface MatchState {
   /** Uint32 seed every random decision in the match is derived from. */
   seed: number;
   rulesVersion: number;
+  /** UTC date (YYYY-MM-DD) a Daily Duel was started on; fixed for the whole attempt. */
+  dailyDate?: string;
   currentRound: number;
   totalRounds: number;
   playerScore: number;
