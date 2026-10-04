@@ -20,6 +20,8 @@ interface RivalPlanningContext {
   playerTile?: TilePosition;
   priorityOwner?: RobotId;
   seed?: number;
+  /** Round length in steps; defaults to the Standard length. */
+  steps?: number;
 }
 
 interface PlayerPlan {
@@ -42,6 +44,7 @@ interface MoveOption {
 }
 
 interface BehaviorTuning {
+  steps: number;
   behavior: RivalMood;
   riskTaking: boolean;
   temperature: number;
@@ -67,7 +70,7 @@ type RandomSource = () => number;
 
 const BASE_TUNING: Record<
   RivalMood,
-  Omit<BehaviorTuning, "behavior" | "riskTaking" | "pathCollisionBias">
+  Omit<BehaviorTuning, "steps" | "behavior" | "riskTaking" | "pathCollisionBias">
 > = {
   aggressive: {
     temperature: 6.5,
@@ -130,6 +133,7 @@ export function planRivalTurn(
   pickups: Pickup[],
   context: RivalPlanningContext = {},
 ): RivalPlan {
+  const steps = context.steps ?? MOVES_PER_ROUND;
   const queue: Move[] = [];
   let currentTile = copyTile(startTile);
   let previousTile: TilePosition | undefined;
@@ -141,15 +145,17 @@ export function planRivalTurn(
     board,
     context.playerTile,
     pickups,
+    steps,
   );
 
-  while (queue.length < MOVES_PER_ROUND) {
+  while (queue.length < steps) {
     behavior = maybeShiftBehavior(behavior, queue.length, random);
     const tuning = createBehaviorTuning(
       behavior,
       context.priorityOwner,
       recentCollisionPlans,
       random,
+      steps,
     );
     const targetRoute = chooseTargetRoute(
       board,
@@ -232,6 +238,7 @@ function createBehaviorTuning(
   priorityOwner: RobotId | undefined,
   recentCollisionPlans: number,
   random: RandomSource,
+  steps: number,
 ): BehaviorTuning {
   const base = BASE_TUNING[behavior];
   const riskTaking = random() < getRiskChance(behavior);
@@ -254,6 +261,7 @@ function createBehaviorTuning(
 
   return {
     ...base,
+    steps,
     behavior,
     riskTaking,
     collisionPenalty: Math.max(0.9, collisionPenalty),
@@ -332,7 +340,7 @@ function chooseWeightedRoute(
 function getContestWeight(route: TargetRoute, tuning: BehaviorTuning): number {
   if (
     route.playerArrivalStep === undefined ||
-    route.playerArrivalStep > MOVES_PER_ROUND
+    route.playerArrivalStep > tuning.steps
   ) {
     return 1;
   }
@@ -400,7 +408,7 @@ function scoreTargetRoute(
   tuning: BehaviorTuning,
 ): number {
   const distance = path.length;
-  const remainingMoves = MOVES_PER_ROUND - queuedMoves;
+  const remainingMoves = tuning.steps - queuedMoves;
   const rivalArrivalStep = queuedMoves + distance;
   let score =
     pickup.value * tuning.valueWeight -
@@ -448,7 +456,7 @@ function isContestablePlayerTarget(
   playerArrivalStep: number,
   tuning: BehaviorTuning,
 ): boolean {
-  if (playerArrivalStep > MOVES_PER_ROUND) {
+  if (playerArrivalStep > tuning.steps) {
     return false;
   }
 
@@ -804,6 +812,7 @@ function createPlayerPlan(
   board: BoardState,
   playerTile: TilePosition | undefined,
   pickups: Pickup[],
+  steps: number,
 ): PlayerPlan | undefined {
   if (!playerTile) {
     return undefined;
@@ -816,7 +825,7 @@ function createPlayerPlan(
   const shortestPickupDistances = new Map<string, number>();
   let currentTile = copyTile(playerTile);
 
-  for (let index = 0; index < MOVES_PER_ROUND; index += 1) {
+  for (let index = 0; index < steps; index += 1) {
     currentTile = validDestination(board, currentTile, playerQueue[index] ?? "wait");
     tiles.push(copyTile(currentTile));
 

@@ -7,22 +7,25 @@ import {
   GAME_HEIGHT,
   GAME_TITLE,
   GAME_WIDTH,
-  MOVES_PER_ROUND,
 } from "./game/constants";
 import { getTileCenter, sameTile } from "./game/board";
 import {
   applyStepScore,
   clearPlayerQueue,
   createInitialMatch,
+  createRestartMatch,
   createRoundState,
   finishRound,
   isPlayerQueueReady,
   lockRoundQueues,
   queuePlayerMove,
   removeLastPlayerMove,
+  skipGuidedIntro,
   startNextRound,
 } from "./game/match-flow";
 import { createMatchCompleteOverlayModel } from "./game/match-end-overlay";
+import { getGuideCoach } from "./game/guide-coach";
+import { recordGuideOutcome } from "./game/onboarding-progress";
 import { createMovePreview } from "./game/preview";
 import { resolveNextStep } from "./game/round-resolution";
 import { AudioManager } from "./game/audio-manager";
@@ -33,6 +36,7 @@ import type {
   PreviewPickupClaim,
 } from "./game/preview";
 import type {
+  MatchMode,
   MatchState,
   MatchStats,
   Move,
@@ -157,12 +161,16 @@ export class GameScene extends Phaser.Scene {
   private debugMatchEndPresetIndex = 0;
   private rulesOverlayMode: RulesOverlayMode | null = null;
   private inputRegistered = false;
+  private sceneStartedAt = 0;
+  private firstRevealLogged = false;
+  private lastCollisionWinner: RobotId | null = null;
 
   constructor() {
     super("GameScene");
   }
 
   create(): void {
+    this.sceneStartedAt = performance.now();
     this.match = createInitialMatch();
     this.round = createRoundState(this.match.currentRound);
     this.rulesOverlayMode = this.hasSeenOnboarding() ? null : "welcome";
@@ -213,6 +221,7 @@ export class GameScene extends Phaser.Scene {
     keyboard.on("keydown-ENTER", () => this.startExecution());
     keyboard.on("keydown-R", () => this.replayMatch());
     keyboard.on("keydown-N", () => this.replayMatch());
+    keyboard.on("keydown-K", () => this.skipToStandardMatch());
     keyboard.on("keydown-H", () => this.toggleRulesOverlay());
     keyboard.on("keydown-ESC", () => this.hideRulesOverlay());
 
@@ -275,17 +284,62 @@ export class GameScene extends Phaser.Scene {
       return;
     }
 
-    const shouldRememberOnboarding = this.rulesOverlayMode === "welcome";
+    if (this.rulesOverlayMode === "welcome") {
+      this.beginFromWelcome("guided");
+      return;
+    }
 
     this.stopVolumeSliderDrag();
     this.rulesOverlayMode = null;
+    this.renderIfNotExecuting();
+  }
 
-    if (shouldRememberOnboarding) {
-      this.rememberOnboardingSeen();
-      this.registerInput();
+  private beginFromWelcome(mode: MatchMode): void {
+    this.stopVolumeSliderDrag();
+    this.rulesOverlayMode = null;
+    this.rememberOnboardingSeen();
+    this.registerInput();
+
+    if (mode === "standard") {
+      recordGuideOutcome(this.safeStorage(), "skipped");
     }
 
-    this.renderIfNotExecuting();
+    this.startMatch(mode);
+  }
+
+  private startMatch(mode: MatchMode): void {
+    this.stopExecutionEffects();
+    this.match = createInitialMatch(mode);
+    this.round = createRoundState(this.match.currentRound, { mode });
+    this.lastCollisionWinner = null;
+    this.render();
+  }
+
+  private skipToStandardMatch(): void {
+    if (
+      this.rulesOverlayVisible ||
+      this.match.mode !== "guided" ||
+      this.match.status === "executing"
+    ) {
+      return;
+    }
+
+    recordGuideOutcome(this.safeStorage(), "skipped");
+    this.stopExecutionEffects();
+    this.match = skipGuidedIntro(this.match);
+    this.round = createRoundState(this.match.currentRound, {
+      mode: this.match.mode,
+    });
+    this.lastCollisionWinner = null;
+    this.render();
+  }
+
+  private safeStorage(): Storage | undefined {
+    try {
+      return window.localStorage;
+    } catch {
+      return undefined;
+    }
   }
 
   private toggleRulesOverlay(): void {
@@ -356,6 +410,8 @@ export class GameScene extends Phaser.Scene {
     }
 
     this.round = lockRoundQueues(this.round);
+    this.lastCollisionWinner = null;
+    this.logFirstReveal();
     this.match = {
       ...this.match,
       status: "executing",
@@ -367,6 +423,16 @@ export class GameScene extends Phaser.Scene {
     this.executionTimer?.remove(false);
     this.executionTimer = undefined;
     this.executeNextStep();
+  }
+
+  private logFirstReveal(): void {
+    if (this.firstRevealLogged) {
+      return;
+    }
+
+    this.firstRevealLogged = true;
+    const seconds = (performance.now() - this.sceneStartedAt) / 1000;
+    console.info(`[Energy Duel] first reveal ${seconds.toFixed(1)}s after load`);
   }
 
   private replayMatch(): void {
@@ -387,8 +453,8 @@ export class GameScene extends Phaser.Scene {
         this.debugMatchEndPresetIndex % DEBUG_MATCH_END_PRESETS.length
       ];
     const finalRound = this.match.totalRounds;
-    const playerQueue = Array<Move>(MOVES_PER_ROUND).fill("wait");
-    const rivalQueue = Array<Move>(MOVES_PER_ROUND).fill("wait");
+    const playerQueue = Array<Move>(this.round.maxSteps).fill("wait");
+    const rivalQueue = Array<Move>(this.round.maxSteps).fill("wait");
 
     this.debugMatchEndPresetIndex += 1;
     this.stopExecutionEffects();
@@ -396,10 +462,10 @@ export class GameScene extends Phaser.Scene {
       ...this.createDebugFinalRoundState(finalRound),
       playerQueue,
       rivalQueue,
-      currentExecutionStep: MOVES_PER_ROUND,
+      currentExecutionStep: this.round.maxSteps,
     };
     this.match = finishRound({
-      ...createInitialMatch(),
+      ...createInitialMatch(this.match.mode),
       currentRound: finalRound,
       playerScore: preset.playerScore,
       rivalScore: preset.rivalScore,
@@ -413,7 +479,7 @@ export class GameScene extends Phaser.Scene {
       return;
     }
 
-    if (this.round.currentExecutionStep >= MOVES_PER_ROUND) {
+    if (this.round.currentExecutionStep >= this.round.maxSteps) {
       this.completeRound();
       return;
     }
@@ -441,6 +507,9 @@ export class GameScene extends Phaser.Scene {
       collectedPickups,
     );
     this.activeStepVisual = stepVisual;
+    this.lastCollisionWinner = resolution.step.collision
+      ? resolution.step.collisionWinner
+      : this.lastCollisionWinner;
     this.logStepResult(resolution.step);
     this.render();
     this.playStepAnimation(stepVisual);
@@ -452,6 +521,11 @@ export class GameScene extends Phaser.Scene {
     this.activeStepVisual = undefined;
     this.audio.setRoundMusicActive(false);
     this.match = finishRound(this.match);
+
+    if (this.match.status === "match-complete" && this.match.mode === "guided") {
+      recordGuideOutcome(this.safeStorage(), "completed");
+    }
+
     this.render();
 
     if (this.match.status === "round-complete") {
@@ -723,7 +797,7 @@ export class GameScene extends Phaser.Scene {
 
     this.activeStepVisual = undefined;
 
-    if (this.round.currentExecutionStep >= MOVES_PER_ROUND) {
+    if (this.round.currentExecutionStep >= this.round.maxSteps) {
       this.completeRound();
       return;
     }
@@ -749,6 +823,7 @@ export class GameScene extends Phaser.Scene {
 
     this.match = startNextRound(this.match);
     this.round = createRoundState(this.match.currentRound, {
+      mode: this.match.mode,
       previousBoard: this.round.board,
       previousPickups: this.round.pickups,
       robotTiles: {
@@ -762,8 +837,11 @@ export class GameScene extends Phaser.Scene {
 
   private restartMatch(): void {
     this.stopExecutionEffects();
-    this.match = createInitialMatch();
-    this.round = createRoundState(this.match.currentRound);
+    this.match = createRestartMatch(this.match);
+    this.round = createRoundState(this.match.currentRound, {
+      mode: this.match.mode,
+    });
+    this.lastCollisionWinner = null;
     this.render();
   }
 
@@ -776,10 +854,12 @@ export class GameScene extends Phaser.Scene {
   }
 
   private createDebugFinalRoundState(finalRound: number): RoundState {
-    let debugRound = createRoundState(1);
+    const mode = this.match.mode;
+    let debugRound = createRoundState(1, { mode });
 
     for (let roundNumber = 2; roundNumber <= finalRound; roundNumber += 1) {
       debugRound = createRoundState(roundNumber, {
+        mode,
         previousBoard: debugRound.board,
         previousPickups: debugRound.pickups,
         robotTiles: {
@@ -1681,6 +1761,67 @@ export class GameScene extends Phaser.Scene {
 
     this.drawQueueReadout();
     this.drawControls();
+    this.drawGuideSkip();
+    this.drawGuideCoach();
+  }
+
+  private drawGuideSkip(): void {
+    if (this.match.mode !== "guided" || this.rulesOverlayVisible) {
+      return;
+    }
+
+    this.drawButton(
+      LEFT_PANEL_X,
+      BOARD_ORIGIN.y + 232,
+      SIDE_PANEL_WIDTH,
+      30,
+      "SKIP TO STANDARD MATCH",
+      this.match.status !== "executing",
+      () => this.skipToStandardMatch(),
+      0.2,
+      "10px",
+    );
+  }
+
+  private drawGuideCoach(): void {
+    const coach = getGuideCoach({
+      mode: this.match.mode,
+      round: this.match.currentRound,
+      status: this.match.status,
+      queueLength: this.round.playerQueue.length,
+      maxSteps: this.round.maxSteps,
+      priorityOwner: this.round.priorityOwner,
+      lastCollisionWinner: this.lastCollisionWinner,
+    });
+
+    if (!coach) {
+      return;
+    }
+
+    const x = BOARD_ORIGIN.x;
+    const y = BOARD_ORIGIN.y + BOARD_PIXEL_SIZE + 10;
+    const g = this.track(this.add.graphics());
+
+    g.setDepth(0.3);
+    g.fillStyle(TRON_THEME.panelFill, 0.9);
+    g.fillRoundedRect(x, y, BOARD_PIXEL_SIZE, 70, 6);
+    g.lineStyle(2, TRON_THEME.rivalAccent, 0.8);
+    g.strokeRoundedRect(x, y, BOARD_PIXEL_SIZE, 70, 6);
+
+    this.drawDepthText(x + 14, y + 8, `GUIDE · ${coach.title}`, {
+      color: TRON_THEME.textAmber,
+      fontSize: "12px",
+      fontStyle: "900",
+      depth: 0.4,
+    });
+    this.drawDepthText(x + 14, y + 28, coach.text, {
+      color: TRON_THEME.textPrimary,
+      fontSize: "14px",
+      fontStyle: "700",
+      depth: 0.4,
+      wordWrapWidth: BOARD_PIXEL_SIZE - 28,
+      lineSpacing: 3,
+    });
   }
 
   private drawRulesOverlay(): void {
@@ -1702,9 +1843,9 @@ export class GameScene extends Phaser.Scene {
     const priorityColor = this.robotColor(this.round.priorityOwner);
     const statusLabel = isWelcome ? "WELCOME TO THE GRID" : "TACTICAL REFERENCE";
     const statusHint = isWelcome
-      ? "Press any key to start. Press H later to reopen the guide."
+      ? "Press any key for a quick guided duel. Press H later to reopen this."
       : "Press H or ESC any time to close this guide.";
-    const closeLabel = isWelcome ? "START MATCH" : "CLOSE RULES";
+    const closeLabel = isWelcome ? "START GUIDED DUEL" : "CLOSE RULES";
     const fadeTargets: Array<Phaser.GameObjects.Graphics | Phaser.GameObjects.Text> =
       [];
     const shade = this.track(this.add.graphics());
@@ -1833,7 +1974,9 @@ export class GameScene extends Phaser.Scene {
         "ROUND FLOW",
         [
           "You are cyan; enemy is orange.",
-          `Queue ${MOVES_PER_ROUND} moves.`,
+          this.rulesOverlayMode === "welcome"
+            ? "Queue 4 moves in round 1, then 8."
+            : `Queue ${this.round.maxSteps} moves.`,
           "Both robots reveal together.",
           "Small nodes are worth 1.",
           "Large nodes are worth 3.",
@@ -1922,6 +2065,30 @@ export class GameScene extends Phaser.Scene {
       panelX + panelWidth - 36,
       panelY + panelHeight - 68,
     );
+
+    if (isWelcome) {
+      this.drawButton(
+        panelX + 36,
+        panelY + panelHeight - 44,
+        268,
+        38,
+        closeLabel,
+        true,
+        () => this.beginFromWelcome("guided"),
+        depth + 1.4,
+      );
+      this.drawButton(
+        panelX + panelWidth - 36 - 268,
+        panelY + panelHeight - 44,
+        268,
+        38,
+        "SKIP TO STANDARD MATCH",
+        true,
+        () => this.beginFromWelcome("standard"),
+        depth + 1.4,
+      );
+      return;
+    }
 
     this.drawButton(
       panelCenterX - 98,
@@ -2187,7 +2354,7 @@ export class GameScene extends Phaser.Scene {
     this.applyTextGlow(
       this.track(
         this.add
-          .text(x, y, `STEP ${this.round.currentExecutionStep} / ${MOVES_PER_ROUND}`, {
+          .text(x, y, `STEP ${this.round.currentExecutionStep} / ${this.round.maxSteps}`, {
             color: TRON_THEME.textPrimary,
             fontFamily: TRON_THEME.fontFamily,
             fontSize: "18px",
@@ -2405,11 +2572,11 @@ export class GameScene extends Phaser.Scene {
       this.drawFinalStats(panelX + 52, panelY + 246, overlay.statLines, depth + 1);
     }
     this.drawButton(
-      panelCenterX - 92,
+      panelCenterX - 110,
       panelY + panelHeight - 54,
-      184,
+      220,
       40,
-      "NEW MATCH",
+      this.match.mode === "guided" ? "START STANDARD MATCH" : "NEW MATCH",
       true,
       () => this.replayMatch(),
       depth + 1,
@@ -2497,6 +2664,7 @@ export class GameScene extends Phaser.Scene {
       depth: number;
       originX?: number;
       lineSpacing?: number;
+      wordWrapWidth?: number;
     },
   ): Phaser.GameObjects.Text {
     const textObject = this.track(
@@ -2506,6 +2674,9 @@ export class GameScene extends Phaser.Scene {
         fontSize: options.fontSize,
         fontStyle: options.fontStyle,
         lineSpacing: options.lineSpacing,
+        wordWrap: options.wordWrapWidth
+          ? { width: options.wordWrapWidth }
+          : undefined,
       }),
     );
 
@@ -2524,7 +2695,7 @@ export class GameScene extends Phaser.Scene {
         this.add.text(
           x,
           y,
-          `YOUR QUEUE ${this.round.playerQueue.length}/${MOVES_PER_ROUND}`,
+          `YOUR QUEUE ${this.round.playerQueue.length}/${this.round.maxSteps}`,
           {
             color: TRON_THEME.textPrimary,
             fontFamily: TRON_THEME.fontFamily,
@@ -2537,7 +2708,7 @@ export class GameScene extends Phaser.Scene {
       8,
     );
 
-    for (let index = 0; index < MOVES_PER_ROUND; index += 1) {
+    for (let index = 0; index < this.round.maxSteps; index += 1) {
       this.drawQueueRow(
         x,
         y + 34 + index * QUEUE_ROW_GAP,
@@ -2866,6 +3037,7 @@ export class GameScene extends Phaser.Scene {
     enabled: boolean,
     onClick: () => void,
     depth = 0,
+    fontSize = "13px",
   ): void {
     const g = this.track(this.add.graphics());
     const fill = enabled ? 0x08263a : 0x07101b;
@@ -2892,7 +3064,7 @@ export class GameScene extends Phaser.Scene {
           .text(x + width / 2, y + height / 2, label, {
             color: enabled ? TRON_THEME.textPrimary : TRON_THEME.textGhost,
             fontFamily: TRON_THEME.fontFamily,
-            fontSize: "13px",
+            fontSize,
             fontStyle: "700",
           })
           .setOrigin(0.5),

@@ -1,4 +1,3 @@
-import { MOVES_PER_ROUND } from "./constants";
 import {
   canEnterTile,
   copyTile,
@@ -35,7 +34,7 @@ export function resolveRound(round: RoundState): RoundResolution {
   let playerScoreDelta = 0;
   let rivalScoreDelta = 0;
 
-  while (nextRound.currentExecutionStep < MOVES_PER_ROUND) {
+  while (nextRound.currentExecutionStep < nextRound.maxSteps) {
     const resolution = resolveNextStep(nextRound);
     nextRound = resolution.round;
     playerScoreDelta += resolution.step.playerScoreDelta;
@@ -52,7 +51,7 @@ export function resolveRound(round: RoundState): RoundResolution {
 }
 
 export function resolveNextStep(round: RoundState): StepResolution {
-  if (round.currentExecutionStep >= MOVES_PER_ROUND) {
+  if (round.currentExecutionStep >= round.maxSteps) {
     throw new Error("Cannot resolve a round that has already finished.");
   }
 

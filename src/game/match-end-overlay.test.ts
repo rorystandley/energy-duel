@@ -59,3 +59,18 @@ function completeMatch(playerScore: number, rivalScore: number): MatchState {
     rivalScore,
   });
 }
+
+describe("guided duel completion", () => {
+  it("points a finished guided duel at the Standard Match", () => {
+    const guided = {
+      ...createInitialMatch("guided"),
+      currentRound: 2,
+      playerScore: 5,
+      rivalScore: 3,
+    };
+    const model = createMatchCompleteOverlayModel(guided);
+
+    expect(model.resultSubtitle).toMatch(/guided/i);
+    expect(model.resultSubtitle).toMatch(/standard/i);
+  });
+});

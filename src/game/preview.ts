@@ -1,4 +1,3 @@
-import { MOVES_PER_ROUND } from "./constants";
 import { canEnterTile, copyTile, moveTile, sameTile } from "./board";
 import type {
   BoardState,
@@ -20,7 +19,7 @@ export interface MovePreview {
 }
 
 export function createMovePreview(round: RoundState): MovePreview | undefined {
-  const committedSteps = Math.min(round.playerQueue.length, MOVES_PER_ROUND);
+  const committedSteps = Math.min(round.playerQueue.length, round.maxSteps);
 
   if (committedSteps === 0) {
     return undefined;

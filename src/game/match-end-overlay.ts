@@ -21,9 +21,14 @@ export function createMatchCompleteOverlayModel(
 ): MatchCompleteOverlayModel {
   const result = getFinalResultCopy(match.playerScore, match.rivalScore);
 
+  const resultSubtitle =
+    match.mode === "guided"
+      ? "Guided duel done. Next: Standard Match."
+      : result.subtitle;
+
   return {
     resultLabel: result.label,
-    resultSubtitle: result.subtitle,
+    resultSubtitle,
     scoreRows: [
       {
         label: "YOUR SCORE",
