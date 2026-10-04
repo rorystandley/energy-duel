@@ -1,0 +1,41 @@
+{
+  "gameId": "j9735w616f56pr1vq3fc7ypvtx852v6k",
+  "note": "Definitions only. Applying them with the wavedash CLI targets the game, not a sandbox: see docs/WAVEDASH_ACHIEVEMENTS.md before running any command.",
+  "stats": [
+    { "identifier": "MATCHES_COMPLETED", "name": "Matches completed" },
+    { "identifier": "MATCHES_WON", "name": "Matches won" },
+    { "identifier": "DAILY_DUELS_COMPLETED", "name": "Daily Duels completed" }
+  ],
+  "achievements": [
+    {
+      "identifier": "FINISH_MATCH",
+      "title": "First Duel",
+      "description": "Finish a Standard Match or Daily Duel.",
+      "secret": false
+    },
+    {
+      "identifier": "WIN_MATCH",
+      "title": "Higher Score",
+      "description": "Win a match by finishing with a higher score than the enemy.",
+      "secret": false
+    },
+    {
+      "identifier": "CLAIM_THREE_HIGH_VALUE_NODES",
+      "title": "Triple Surge",
+      "description": "Claim three high-value (3-point) nodes in a single match.",
+      "secret": false
+    },
+    {
+      "identifier": "WIN_CLASH_ON_ENEMY_PRIORITY",
+      "title": "Against the Odds",
+      "description": "Win a clash in a round where the enemy holds collision priority.",
+      "secret": false
+    },
+    {
+      "identifier": "COMPLETE_DAILY_DUEL",
+      "title": "Daily Duelist",
+      "description": "Finish a Daily Duel, win or lose.",
+      "secret": false
+    }
+  ]
+}

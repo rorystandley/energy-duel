@@ -37,6 +37,9 @@ import {
   utcDateString,
 } from "./game/daily";
 import type { DailyHistory, DailyRankSummary } from "./game/daily";
+import { MasteryTracker } from "./game/mastery";
+import type { AchievementId } from "./game/mastery";
+import { wavedash } from "./platform/wavedash";
 import { findDebugReplay } from "./game/debug-match";
 import { deriveMatchStats, getPickupCollector } from "./game/match-story";
 import {
@@ -178,6 +181,11 @@ export class GameScene extends Phaser.Scene {
   private dailyHistoryWritable = false;
   /** Rank of the Daily Duel attempt that just finished; null for any other match. */
   private dailyRank: DailyRankSummary | null = null;
+  /** Increments per match started, so a rematch on the same seed still counts as its own match. */
+  private matchSerial = 0;
+  private mastery!: MasteryTracker;
+  /** Achievements unlocked by the match now on the end screen. */
+  private matchUnlocks: AchievementId[] = [];
   private backdrop?: Phaser.GameObjects.Graphics;
 
   constructor() {
@@ -186,6 +194,17 @@ export class GameScene extends Phaser.Scene {
 
   create(): void {
     this.sceneStartedAt = performance.now();
+    this.mastery = new MasteryTracker({
+      sink: wavedash,
+      storage: this.safeStorage(),
+      onSyncState: () => {
+        if (this.match.status === "match-complete" && !this.replayView) {
+          this.render();
+        }
+      },
+    });
+    // Re-send unlocks that an earlier session could not store; a no-op for guests.
+    void wavedash.initialize().then(() => this.mastery.sync());
     this.match = createInitialMatch();
     this.round = createRoundState(this.match.currentRound, {
       seed: this.match.seed,
@@ -455,6 +474,8 @@ export class GameScene extends Phaser.Scene {
     this.dailyRank = null;
     this.lockedRound = undefined;
     this.match = match;
+    this.matchSerial += 1;
+    this.matchUnlocks = [];
     this.round = createRoundState(match.currentRound, {
       mode: match.mode,
       seed: match.seed,
@@ -498,10 +519,12 @@ export class GameScene extends Phaser.Scene {
   private dailyOverlayOptions(): {
     dailyRank: DailyRankSummary | null;
     dailyStatus: ReturnType<typeof dailyBoardStatus>;
+    mastery: { unlocked: AchievementId[]; sync: MasteryTracker["syncState"] };
   } {
     return {
       dailyRank: this.dailyRank,
       dailyStatus: dailyBoardStatus(this.match),
+      mastery: { unlocked: this.matchUnlocks, sync: this.mastery.syncState },
     };
   }
 
@@ -732,6 +755,10 @@ export class GameScene extends Phaser.Scene {
       this.completeDailyAttempt();
     }
 
+    if (this.match.status === "match-complete") {
+      this.matchUnlocks = this.mastery.recordMatch(this.matchSerial, this.match).unlocked;
+    }
+
     if (this.match.status === "match-complete" && this.match.mode === "guided") {
       recordGuideOutcome(this.safeStorage(), "completed");
     }
@@ -819,6 +846,10 @@ export class GameScene extends Phaser.Scene {
 
     if (step.collisionWinner === "player") {
       stats.playerCollisionsWon += 1;
+
+      if (this.round.priorityOwner === "rival") {
+        stats.playerClashesWonOnRivalPriority += 1;
+      }
     } else if (step.collisionWinner === "rival") {
       stats.rivalCollisionsWon += 1;
     }

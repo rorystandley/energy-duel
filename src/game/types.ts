@@ -77,6 +77,8 @@ export interface MatchStats {
   rivalThreePointPickupsCollected: number;
   playerCollisionsWon: number;
   rivalCollisionsWon: number;
+  /** Clashes the player won in rounds where the rival held collision priority. */
+  playerClashesWonOnRivalPriority: number;
 }
 
 export interface RoundState {

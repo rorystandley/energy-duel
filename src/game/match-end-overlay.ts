@@ -1,4 +1,6 @@
 import type { DailyBoardStatus, DailyRankSummary } from "./daily";
+import { ACHIEVEMENT_TITLES } from "./mastery";
+import type { AchievementId, MasterySyncState } from "./mastery";
 import { deriveRoundStories, pickBestRound } from "./match-story";
 import type { ReplayRecord } from "./replay";
 import type { MatchState, RobotId } from "./types";
@@ -51,6 +53,32 @@ export interface MatchCompleteOverlayOptions {
   dailyRank?: DailyRankSummary | null;
   /** Whether the Daily Duel board is still today's. */
   dailyStatus?: DailyBoardStatus | null;
+  /** Achievements this match unlocked for the first time on this device, and whether Wavedash has them. */
+  mastery?: { unlocked: AchievementId[]; sync: MasterySyncState } | null;
+}
+
+const SYNC_LABELS: Record<MasterySyncState, string> = {
+  local: "SAVED ON THIS DEVICE",
+  pending: "SAVING TO WAVEDASH...",
+  saved: "SAVED TO WAVEDASH",
+  failed: "WAVEDASH SAVE RETRYING LATER",
+};
+
+function describeMasteryRows(
+  mastery: MatchCompleteOverlayOptions["mastery"],
+): MatchCompleteScoreRow[] {
+  if (!mastery || mastery.unlocked.length === 0) {
+    return [];
+  }
+
+  return [
+    ...mastery.unlocked.map((id) => ({
+      label: "ACHIEVEMENT",
+      value: ACHIEVEMENT_TITLES[id],
+      tone: "player" as const,
+    })),
+    { label: "ACHIEVEMENT SAVE", value: SYNC_LABELS[mastery.sync], tone: "neutral" as const },
+  ];
 }
 
 export const SHARE_DISCLAIMER =
@@ -126,6 +154,7 @@ export function createMatchCompleteOverlayModel(
           : "n/a",
         tone: "neutral",
       },
+      ...describeMasteryRows(options.mastery),
     ],
     nextTarget: describeNextTarget(match, options),
     actions,

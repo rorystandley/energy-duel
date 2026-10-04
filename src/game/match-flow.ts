@@ -68,6 +68,7 @@ function createInitialMatchStats(): MatchStats {
     rivalThreePointPickupsCollected: 0,
     playerCollisionsWon: 0,
     rivalCollisionsWon: 0,
+    playerClashesWonOnRivalPriority: 0,
   };
 }
 

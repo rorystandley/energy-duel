@@ -19,6 +19,41 @@ export interface WavedashSdkLike {
   init(config?: { debug?: boolean }): boolean;
   getUserId(): string;
   getUsername(): string;
+  requestStats(): Promise<unknown>;
+  getStat(identifier: string): number;
+  setStat(identifier: string, value: number, storeNow?: boolean): boolean;
+  setAchievement(identifier: string, storeNow?: boolean): boolean;
+  storeStats(): boolean;
+  addEventListener(type: string, listener: EventListenerOrEventListenerObject | null): void;
+  removeEventListener(type: string, listener: EventListenerOrEventListenerObject | null): void;
+}
+
+/** Why a progress write did not reach Wavedash. */
+export type ProgressUnavailableReason =
+  | "guest" // no Wavedash host: local or itch.io play
+  | "signed-out" // hosted, but nobody is signed in
+  | "sdk-error" // the SDK failed to load or initialise
+  | "not-ready" // stats/achievements never loaded, or an identifier is not defined for this game
+  | "rejected"; // the SDK refused a write for a defined identifier
+
+export type ProgressCommitResult =
+  | { status: "stored" }
+  | { status: "unavailable"; reason: ProgressUnavailableReason }
+  | { status: "failed"; message: string };
+
+export interface ProgressWrite {
+  stats: Record<string, number>;
+  achievements: string[];
+}
+
+export interface ProgressRequest {
+  /** Every stat identifier the write may touch; the first doubles as the readiness probe. */
+  statIds: readonly [string, ...string[]];
+  /**
+   * Called only once stats and achievements have loaded, so `readStat` never
+   * returns the SDK's pre-load default of 0.
+   */
+  build(readStat: (identifier: string) => number): ProgressWrite;
 }
 
 export interface WavedashAdapter {
@@ -26,12 +61,25 @@ export interface WavedashAdapter {
   /** Safe to call repeatedly; the SDK is initialised once. Never rejects. */
   initialize(): Promise<PlatformStatus>;
   getIdentity(): PlatformIdentity;
+  /**
+   * Waits for stats and achievements to load, writes, and resolves only once the
+   * SDK reports the write stored. Never rejects. Safe to call again after any
+   * non-"stored" result; an identical write that is already stored is a no-op.
+   */
+  commitProgress(request: ProgressRequest): Promise<ProgressCommitResult>;
 }
 
 export interface WavedashAdapterOptions {
   loadSdk?: () => Promise<WavedashSdkLike | null>;
   onError?: (error: unknown) => void;
+  /** How long to wait for stats/achievements to load. */
+  readyTimeoutMs?: number;
+  readyPollMs?: number;
+  /** How long to wait for the StatsStored confirmation. */
+  storeTimeoutMs?: number;
 }
+
+const STATS_STORED_EVENT = "StatsStored";
 
 const GUEST_IDENTITY: PlatformIdentity = {
   signedIn: false,
@@ -56,6 +104,119 @@ export function createWavedashAdapter(
   let status: PlatformStatus = "pending";
   let sdk: WavedashSdkLike | null = null;
   let starting: Promise<PlatformStatus> | null = null;
+  const readyTimeoutMs = options.readyTimeoutMs ?? 10_000;
+  const readyPollMs = options.readyPollMs ?? 250;
+  const storeTimeoutMs = options.storeTimeoutMs ?? 8_000;
+
+  let statsRequested: Promise<unknown> | null = null;
+  let committing: Promise<unknown> = Promise.resolve();
+  /** What Wavedash has confirmed stored in this session. */
+  const confirmedStats = new Map<string, number>();
+  const confirmedAchievements = new Set<string>();
+  /** A failed store leaves SDK stats clean but unsaved, so stats are re-dirtied on the next try. */
+  let lastStoreFailed = false;
+
+  async function waitUntilReady(sdk: WavedashSdkLike, probe: string): Promise<boolean> {
+    // Writing a stat its current value changes nothing, and is refused until
+    // both stats and achievements have loaded and the identifier is defined.
+    const deadline = Date.now() + readyTimeoutMs;
+    for (;;) {
+      if (sdk.setStat(probe, sdk.getStat(probe))) return true;
+      if (Date.now() >= deadline) return false;
+      await new Promise((resolve) => setTimeout(resolve, readyPollMs));
+    }
+  }
+
+  function waitForStored(sdk: WavedashSdkLike): {
+    stored: Promise<ProgressCommitResult>;
+    dispose(): void;
+  } {
+    let listener: EventListenerOrEventListenerObject | null = null;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const dispose = () => {
+      if (listener) sdk.removeEventListener(STATS_STORED_EVENT, listener);
+      listener = null;
+      clearTimeout(timer);
+    };
+    const stored = new Promise<ProgressCommitResult>((resolve) => {
+      listener = (event) => {
+        const detail = (event as CustomEvent<{ success?: boolean; message?: string }>).detail;
+        dispose();
+        resolve(
+          detail?.success
+            ? { status: "stored" }
+            : { status: "failed", message: detail?.message ?? "Wavedash could not store progress" },
+        );
+      };
+      sdk.addEventListener(STATS_STORED_EVENT, listener);
+      timer = setTimeout(() => {
+        dispose();
+        resolve({ status: "failed", message: "Timed out waiting for Wavedash to store progress" });
+      }, storeTimeoutMs);
+    });
+    return { stored, dispose };
+  }
+
+  async function commit(request: ProgressRequest): Promise<ProgressCommitResult> {
+    const platformStatus = await adapter.initialize();
+    if (platformStatus === "guest") return { status: "unavailable", reason: "guest" };
+    if (platformStatus !== "wavedash" || !sdk) return { status: "unavailable", reason: "sdk-error" };
+    if (!adapter.getIdentity().signedIn) return { status: "unavailable", reason: "signed-out" };
+
+    try {
+      statsRequested ??= sdk.requestStats().catch((error) => {
+        statsRequested = null;
+        throw error;
+      });
+      await statsRequested;
+
+      if (!(await waitUntilReady(sdk, request.statIds[0]))) {
+        return { status: "unavailable", reason: "not-ready" };
+      }
+
+      const write = request.build((identifier) => sdk!.getStat(identifier));
+      const alreadyStored =
+        !lastStoreFailed &&
+        Object.entries(write.stats).every(([id, value]) => confirmedStats.get(id) === value) &&
+        write.achievements.every((id) => confirmedAchievements.has(id));
+      if (alreadyStored) return { status: "stored" };
+
+      const awaiting = waitForStored(sdk);
+      try {
+        for (const [identifier, value] of Object.entries(write.stats)) {
+          if (lastStoreFailed) sdk.setStat(identifier, value + 1);
+          if (!sdk.setStat(identifier, value)) {
+            awaiting.dispose();
+            return { status: "unavailable", reason: "rejected" };
+          }
+        }
+        for (const identifier of write.achievements) {
+          if (!sdk.setAchievement(identifier)) {
+            awaiting.dispose();
+            return { status: "unavailable", reason: "rejected" };
+          }
+        }
+        if (!sdk.storeStats()) {
+          awaiting.dispose();
+          return { status: "unavailable", reason: "not-ready" };
+        }
+      } catch (error) {
+        awaiting.dispose();
+        throw error;
+      }
+
+      const result = await awaiting.stored;
+      lastStoreFailed = result.status !== "stored";
+      if (result.status === "stored") {
+        for (const [id, value] of Object.entries(write.stats)) confirmedStats.set(id, value);
+        for (const id of write.achievements) confirmedAchievements.add(id);
+      }
+      return result;
+    } catch (error) {
+      lastStoreFailed = true;
+      return { status: "failed", message: error instanceof Error ? error.message : String(error) };
+    }
+  }
 
   async function start(): Promise<PlatformStatus> {
     try {
@@ -75,9 +236,15 @@ export function createWavedashAdapter(
     return status;
   }
 
-  return {
+  const adapter: WavedashAdapter = {
     get status() {
       return status;
+    },
+    commitProgress(request) {
+      // One write at a time: the SDK keeps a single in-flight store.
+      const result = committing.then(() => commit(request));
+      committing = result.catch(() => undefined);
+      return result;
     },
     initialize() {
       starting ??= start();
@@ -94,6 +261,7 @@ export function createWavedashAdapter(
       }
     },
   };
+  return adapter;
 }
 
 export const wavedash = createWavedashAdapter();
