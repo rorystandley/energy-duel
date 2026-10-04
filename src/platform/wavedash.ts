@@ -35,6 +35,12 @@ export interface WavedashSdkLike {
     ugcId?: never,
     metadata?: Record<string, string | number | boolean>,
   ): Promise<SdkResponse<SdkUpsertedEntry>>;
+  /** Cloud files: a local IndexedDB file is uploaded, or downloaded to one and then read. */
+  writeLocalFile(filePath: string, data: Uint8Array): Promise<boolean>;
+  readLocalFile(filePath: string): Promise<Uint8Array | null>;
+  uploadRemoteFile(filePath: string): Promise<SdkResponse<string>>;
+  downloadRemoteFile(filePath: string): Promise<SdkResponse<string>>;
+  remoteFileExists(filePath: string): Promise<SdkResponse<boolean>>;
 }
 
 type SdkResponse<T> = { success: true; data: T } | { success: false; data: null; message: string };
@@ -99,6 +105,20 @@ export interface ProgressRequest {
   build(readStat: (identifier: string) => number): ProgressWrite;
 }
 
+/** Why a cloud file could not be read or written. */
+export type CloudFileUnavailableReason = "guest" | "signed-out" | "sdk-error";
+
+export type CloudFileReadResult =
+  | { status: "found"; text: string }
+  | { status: "missing" }
+  | { status: "unavailable"; reason: CloudFileUnavailableReason }
+  | { status: "failed"; message: string };
+
+export type CloudFileWriteResult =
+  | { status: "stored" }
+  | { status: "unavailable"; reason: CloudFileUnavailableReason }
+  | { status: "failed"; message: string };
+
 export interface WavedashAdapter {
   readonly status: PlatformStatus;
   /** Safe to call repeatedly; the SDK is initialised once. Never rejects. */
@@ -115,6 +135,13 @@ export interface WavedashAdapter {
    * Resolves `submitted` only when Wavedash returned the entry. Never rejects.
    */
   submitLeaderboardScore(request: LeaderboardSubmitRequest): Promise<LeaderboardSubmitResult>;
+  /**
+   * Reads a text file from the signed-in player's cloud storage. `missing` means
+   * the platform confirmed there is no such file. Never rejects.
+   */
+  readCloudFile(path: string): Promise<CloudFileReadResult>;
+  /** Writes a text file and resolves `stored` only once the upload succeeded. Never rejects. */
+  writeCloudFile(path: string, text: string): Promise<CloudFileWriteResult>;
 }
 
 export interface WavedashAdapterOptions {
@@ -308,6 +335,71 @@ export function createWavedashAdapter(
     }
   }
 
+  /** One cloud-file operation at a time: they share the SDK's local copy of each file. */
+  let cloudFiles: Promise<unknown> = Promise.resolve();
+
+  function queueCloudFile<T>(operation: () => Promise<T>): Promise<T> {
+    const result = cloudFiles.then(operation);
+    cloudFiles = result.catch(() => undefined);
+    return result;
+  }
+
+  async function cloudAvailability(): Promise<
+    { ok: true; sdk: WavedashSdkLike } | { ok: false; reason: CloudFileUnavailableReason }
+  > {
+    const platformStatus = await adapter.initialize();
+    if (platformStatus === "guest") return { ok: false, reason: "guest" };
+    if (platformStatus !== "wavedash" || !sdk) return { ok: false, reason: "sdk-error" };
+    if (!adapter.getIdentity().signedIn) return { ok: false, reason: "signed-out" };
+    return { ok: true, sdk };
+  }
+
+  const errorMessage = (error: unknown) => (error instanceof Error ? error.message : String(error));
+
+  function readCloudFile(path: string): Promise<CloudFileReadResult> {
+    return queueCloudFile(async () => {
+      const available = await cloudAvailability();
+      if (!available.ok) return { status: "unavailable", reason: available.reason };
+
+      try {
+        // The HEAD check is how "no file yet" is told apart from a failed download.
+        const exists = await available.sdk.remoteFileExists(path);
+        if (!exists.success) return { status: "failed", message: exists.message };
+        if (!exists.data) return { status: "missing" };
+
+        const downloaded = await available.sdk.downloadRemoteFile(path);
+        if (!downloaded.success) return { status: "failed", message: downloaded.message };
+
+        const bytes = await available.sdk.readLocalFile(downloaded.data || path);
+        if (!bytes) return { status: "failed", message: "Downloaded cloud file could not be read" };
+
+        return { status: "found", text: new TextDecoder().decode(bytes) };
+      } catch (error) {
+        return { status: "failed", message: errorMessage(error) };
+      }
+    });
+  }
+
+  function writeCloudFile(path: string, text: string): Promise<CloudFileWriteResult> {
+    return queueCloudFile(async () => {
+      const available = await cloudAvailability();
+      if (!available.ok) return { status: "unavailable", reason: available.reason };
+
+      try {
+        if (!(await available.sdk.writeLocalFile(path, new TextEncoder().encode(text)))) {
+          return { status: "failed", message: "Could not write the local copy of the cloud file" };
+        }
+
+        const uploaded = await available.sdk.uploadRemoteFile(path);
+        return uploaded.success
+          ? { status: "stored" }
+          : { status: "failed", message: uploaded.message };
+      } catch (error) {
+        return { status: "failed", message: errorMessage(error) };
+      }
+    });
+  }
+
   async function start(): Promise<PlatformStatus> {
     try {
       const loaded = await loadSdk();
@@ -337,6 +429,8 @@ export function createWavedashAdapter(
       return result;
     },
     submitLeaderboardScore: submit,
+    readCloudFile,
+    writeCloudFile,
     initialize() {
       starting ??= start();
       return starting;

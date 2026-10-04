@@ -21,6 +21,11 @@ function fakeSdk(overrides: Partial<WavedashSdkLike> = {}): WavedashSdkLike & {
       success: true,
       data: { score: 4, globalRank: 2, submittedScore: 4, submittedRank: 2 },
     }),
+    writeLocalFile: async () => true,
+    readLocalFile: async () => null,
+    uploadRemoteFile: async (path: string) => ({ success: true, data: path }),
+    downloadRemoteFile: async (path: string) => ({ success: true, data: path }),
+    remoteFileExists: async () => ({ success: true, data: true }),
     ...overrides,
   } as WavedashSdkLike & { init: ReturnType<typeof vi.fn> };
 }
@@ -365,5 +370,135 @@ describe("wavedash leaderboard submission", () => {
     await adapter.submitLeaderboardScore(request);
     await adapter.submitLeaderboardScore(request);
     expect(getLeaderboard).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("wavedash cloud files", () => {
+  const bytes = (text: string) => new TextEncoder().encode(text);
+
+  it("reads a file: checks it exists, downloads it, then reads the local copy", async () => {
+    const calls: string[] = [];
+    const adapter = createWavedashAdapter({
+      loadSdk: async () =>
+        fakeSdk({
+          remoteFileExists: async (path) => (calls.push(`exists ${path}`), { success: true, data: true }),
+          downloadRemoteFile: async (path) => (calls.push(`download ${path}`), { success: true, data: path }),
+          readLocalFile: async (path) => (calls.push(`read ${path}`), bytes('{"ok":1}')),
+        }),
+    });
+
+    await expect(adapter.readCloudFile("saves/progress.json")).resolves.toEqual({
+      status: "found",
+      text: '{"ok":1}',
+    });
+    expect(calls).toEqual([
+      "exists saves/progress.json",
+      "download saves/progress.json",
+      "read saves/progress.json",
+    ]);
+  });
+
+  it("reports a file the platform says does not exist as missing, without downloading", async () => {
+    const download = vi.fn(async (path: string) => ({ success: true as const, data: path }));
+    const adapter = createWavedashAdapter({
+      loadSdk: async () =>
+        fakeSdk({
+          remoteFileExists: async () => ({ success: true, data: false }),
+          downloadRemoteFile: download,
+        }),
+    });
+
+    await expect(adapter.readCloudFile("saves/progress.json")).resolves.toEqual({ status: "missing" });
+    expect(download).not.toHaveBeenCalled();
+  });
+
+  it("reports failures distinctly from a missing file", async () => {
+    const failures: Array<Partial<WavedashSdkLike>> = [
+      { remoteFileExists: async () => ({ success: false, data: null, message: "401" }) },
+      { downloadRemoteFile: async () => ({ success: false, data: null, message: "500 (Server Error)" }) },
+      { readLocalFile: async () => null },
+      {
+        remoteFileExists: async () => {
+          throw new Error("offline");
+        },
+      },
+    ];
+
+    for (const failure of failures) {
+      const adapter = createWavedashAdapter({ loadSdk: async () => fakeSdk(failure) });
+      expect((await adapter.readCloudFile("saves/progress.json")).status).toBe("failed");
+    }
+  });
+
+  it("writes a file by saving it locally, then uploading it", async () => {
+    const written: Array<[string, string]> = [];
+    const upload = vi.fn(async (path: string) => ({ success: true as const, data: path }));
+    const adapter = createWavedashAdapter({
+      loadSdk: async () =>
+        fakeSdk({
+          writeLocalFile: async (path, data) => {
+            written.push([path, new TextDecoder().decode(data)]);
+            return true;
+          },
+          uploadRemoteFile: upload,
+        }),
+    });
+
+    await expect(adapter.writeCloudFile("saves/progress.json", "hello")).resolves.toEqual({
+      status: "stored",
+    });
+    expect(written).toEqual([["saves/progress.json", "hello"]]);
+    expect(upload).toHaveBeenCalledWith("saves/progress.json");
+  });
+
+  it("does not report stored when the local write or the upload fails", async () => {
+    const localFail = createWavedashAdapter({
+      loadSdk: async () => fakeSdk({ writeLocalFile: async () => false }),
+    });
+    const uploadFail = createWavedashAdapter({
+      loadSdk: async () =>
+        fakeSdk({ uploadRemoteFile: async () => ({ success: false, data: null, message: "413" }) }),
+    });
+
+    expect((await localFail.writeCloudFile("a", "b")).status).toBe("failed");
+    expect(await uploadFail.writeCloudFile("a", "b")).toEqual({ status: "failed", message: "413" });
+  });
+
+  it("is unavailable for guests and signed-out players without touching the SDK", async () => {
+    const exists = vi.fn(async () => ({ success: true as const, data: true }));
+    const guest = createWavedashAdapter({ loadSdk: async () => null });
+    const signedOut = createWavedashAdapter({
+      loadSdk: async () => fakeSdk({ getUserId: () => "", remoteFileExists: exists }),
+    });
+
+    expect(await guest.readCloudFile("a")).toEqual({ status: "unavailable", reason: "guest" });
+    expect(await guest.writeCloudFile("a", "b")).toEqual({ status: "unavailable", reason: "guest" });
+    expect(await signedOut.readCloudFile("a")).toEqual({ status: "unavailable", reason: "signed-out" });
+    expect(exists).not.toHaveBeenCalled();
+  });
+
+  it("runs cloud file operations one at a time", async () => {
+    let active = 0;
+    let peak = 0;
+    const adapter = createWavedashAdapter({
+      loadSdk: async () =>
+        fakeSdk({
+          writeLocalFile: async () => {
+            active += 1;
+            peak = Math.max(peak, active);
+            await new Promise((resolve) => setTimeout(resolve, 5));
+            active -= 1;
+            return true;
+          },
+        }),
+    });
+
+    await Promise.all([
+      adapter.writeCloudFile("a", "1"),
+      adapter.writeCloudFile("a", "2"),
+      adapter.writeCloudFile("a", "3"),
+    ]);
+
+    expect(peak).toBe(1);
   });
 });
