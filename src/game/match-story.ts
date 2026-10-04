@@ -76,12 +76,17 @@ export function deriveMatchStats(replay: ReplayRecord): MatchStats {
     rivalThreePointPickupsCollected: 0,
     playerCollisionsWon: 0,
     rivalCollisionsWon: 0,
+    playerClashesWonOnRivalPriority: 0,
   };
 
   for (const round of replay.rounds) {
     for (const step of round.steps) {
       if (step.collisionWinner === "player") {
         stats.playerCollisionsWon += 1;
+
+        if (round.priorityOwner === "rival") {
+          stats.playerClashesWonOnRivalPriority += 1;
+        }
       } else if (step.collisionWinner === "rival") {
         stats.rivalCollisionsWon += 1;
       }

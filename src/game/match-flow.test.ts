@@ -61,6 +61,7 @@ describe("match flow", () => {
         rivalThreePointPickupsCollected: 0,
         playerCollisionsWon: 0,
         rivalCollisionsWon: 0,
+        playerClashesWonOnRivalPriority: 0,
       },
     });
   });

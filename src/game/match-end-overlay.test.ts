@@ -193,3 +193,23 @@ describe("Daily Duel end screen", () => {
     expect(overlay.actions.map((action) => action.id)).toContain("daily");
   });
 });
+
+describe("match-end achievements rows", () => {
+  const match = { ...createInitialMatch("standard", { seed: 1 }), status: "match-complete" as const };
+
+  it("lists new unlocks with their save state, and nothing when there are none", () => {
+    const withUnlock = createMatchCompleteOverlayModel(match, {
+      mastery: { unlocked: ["FINISH_MATCH", "WIN_MATCH"], sync: "saved" },
+    });
+    const rows = withUnlock.storyRows.filter((row) => row.label.startsWith("ACHIEVEMENT"));
+    expect(rows.map((row) => row.value)).toEqual(["First Duel", "Higher Score", "SAVED TO WAVEDASH"]);
+
+    const guest = createMatchCompleteOverlayModel(match, {
+      mastery: { unlocked: ["FINISH_MATCH"], sync: "local" },
+    });
+    expect(guest.storyRows.at(-1)?.value).toBe("SAVED ON THIS DEVICE");
+
+    const none = createMatchCompleteOverlayModel(match, { mastery: { unlocked: [], sync: "saved" } });
+    expect(none.storyRows.some((row) => row.label.startsWith("ACHIEVEMENT"))).toBe(false);
+  });
+});
