@@ -1,6 +1,16 @@
 import { MOVES_PER_ROUND, TOTAL_ROUNDS } from "./constants";
 import type { MatchMode } from "./types";
 
+/**
+ * Version of the deterministic rules (board generation, pickup placement,
+ * rival planning, step resolution). Bump it whenever any of those change the
+ * outcome for a given seed and queues, and add the old number to
+ * SUPPORTED_RULES_VERSIONS only if the old behaviour is still reproducible.
+ */
+export const RULES_VERSION = 1;
+
+export const SUPPORTED_RULES_VERSIONS: readonly number[] = [1];
+
 interface ModeRules {
   totalRounds: number;
   movesForRound: (round: number) => number;

@@ -13,6 +13,7 @@ import {
   applyStepScore,
   clearPlayerQueue,
   createInitialMatch,
+  createNextRoundState,
   createRestartMatch,
   createRoundState,
   finishRound,
@@ -31,6 +32,12 @@ import { computeLayout, isCompact } from "./game/layout";
 import type { CompactLayout, GameLayout, Rect } from "./game/layout";
 import { recordGuideOutcome } from "./game/onboarding-progress";
 import { createMovePreview } from "./game/preview";
+import {
+  createReplay,
+  finalizeReplay,
+  recordReplayRound,
+  type ReplayRecord,
+} from "./game/replay";
 import { resolveNextStep } from "./game/round-resolution";
 import { AudioManager } from "./game/audio-manager";
 import { getPickupStyle, TRON_THEME } from "./game/tron-theme";
@@ -178,6 +185,9 @@ export class GameScene extends Phaser.Scene {
   private roundSteps: StepResult[] = [];
   private roundStartPickups: Pickup[] = [];
   private roundSummary: RoundSummary | null = null;
+  /** Versioned record of the current match; a replay UI will read this later. */
+  private replay!: ReplayRecord;
+  private lockedRound?: RoundState;
   private backdrop?: Phaser.GameObjects.Graphics;
 
   constructor() {
@@ -187,7 +197,10 @@ export class GameScene extends Phaser.Scene {
   create(): void {
     this.sceneStartedAt = performance.now();
     this.match = createInitialMatch();
-    this.round = createRoundState(this.match.currentRound);
+    this.round = createRoundState(this.match.currentRound, {
+      seed: this.match.seed,
+    });
+    this.replay = createReplay(this.match);
     this.rulesOverlayMode = this.hasSeenOnboarding() ? null : "welcome";
 
     this.refreshLayout();
@@ -388,7 +401,11 @@ export class GameScene extends Phaser.Scene {
     this.stopExecutionEffects();
     this.roundSummary = null;
     this.match = createInitialMatch(mode);
-    this.round = createRoundState(this.match.currentRound, { mode });
+    this.round = createRoundState(this.match.currentRound, {
+      mode,
+      seed: this.match.seed,
+    });
+    this.replay = createReplay(this.match);
     this.lastCollisionWinner = null;
     this.render();
   }
@@ -407,7 +424,9 @@ export class GameScene extends Phaser.Scene {
     this.match = skipGuidedIntro(this.match);
     this.round = createRoundState(this.match.currentRound, {
       mode: this.match.mode,
+      seed: this.match.seed,
     });
+    this.replay = createReplay(this.match);
     this.lastCollisionWinner = null;
     this.render();
   }
@@ -488,6 +507,7 @@ export class GameScene extends Phaser.Scene {
     }
 
     this.round = lockRoundQueues(this.round);
+    this.lockedRound = this.round;
     this.roundSteps = [];
     this.roundStartPickups = this.round.pickups.map((pickup) => ({
       ...pickup,
@@ -608,6 +628,19 @@ export class GameScene extends Phaser.Scene {
     this.audio.setRoundMusicActive(false);
     this.match = finishRound(this.match);
 
+    if (this.lockedRound) {
+      this.replay = recordReplayRound(
+        this.replay,
+        this.lockedRound,
+        this.roundSteps,
+      );
+      this.lockedRound = undefined;
+    }
+
+    if (this.match.status === "match-complete") {
+      this.replay = finalizeReplay(this.replay, this.match);
+    }
+
     if (this.match.status === "match-complete" && this.match.mode === "guided") {
       recordGuideOutcome(this.safeStorage(), "completed");
     }
@@ -619,8 +652,9 @@ export class GameScene extends Phaser.Scene {
         steps: this.roundSteps,
         startPickups: this.roundStartPickups,
       });
-      this.render();
     }
+
+    this.render();
   }
 
   private continueFromSummary(): void {
@@ -916,20 +950,9 @@ export class GameScene extends Phaser.Scene {
       return;
     }
 
-    const playerTile = this.round.player.tile;
-    const rivalTile = this.round.rival.tile;
-
     this.roundSummary = null;
     this.match = startNextRound(this.match);
-    this.round = createRoundState(this.match.currentRound, {
-      mode: this.match.mode,
-      previousBoard: this.round.board,
-      previousPickups: this.round.pickups,
-      robotTiles: {
-        player: playerTile,
-        rival: rivalTile,
-      },
-    });
+    this.round = createNextRoundState(this.match, this.round);
     this.activeStepVisual = undefined;
     this.render();
   }
@@ -940,7 +963,9 @@ export class GameScene extends Phaser.Scene {
     this.match = createRestartMatch(this.match);
     this.round = createRoundState(this.match.currentRound, {
       mode: this.match.mode,
+      seed: this.match.seed,
     });
+    this.replay = createReplay(this.match);
     this.lastCollisionWinner = null;
     this.render();
   }
@@ -955,11 +980,12 @@ export class GameScene extends Phaser.Scene {
 
   private createDebugFinalRoundState(finalRound: number): RoundState {
     const mode = this.match.mode;
-    let debugRound = createRoundState(1, { mode });
+    let debugRound = createRoundState(1, { mode, seed: this.match.seed });
 
     for (let roundNumber = 2; roundNumber <= finalRound; roundNumber += 1) {
       debugRound = createRoundState(roundNumber, {
         mode,
+        seed: this.match.seed,
         previousBoard: debugRound.board,
         previousPickups: debugRound.pickups,
         robotTiles: {

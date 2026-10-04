@@ -105,7 +105,10 @@ describe("match flow", () => {
   it("skips from the guide to a fresh Standard match", () => {
     const mid = { ...createInitialMatch("guided"), playerScore: 3, currentRound: 2 };
     const skipped = skipGuidedIntro(mid);
-    expect(skipped).toEqual(createInitialMatch("standard"));
+    expect(skipped).toEqual(
+      createInitialMatch("standard", { seed: skipped.seed }),
+    );
+    expect(skipped.seed).not.toBe(mid.seed);
   });
 
   it("leaves a Standard match untouched when asked to skip the guide", () => {
@@ -115,7 +118,10 @@ describe("match flow", () => {
 
   it("restarts into Standard after a guided duel", () => {
     const done = finishRound({ ...createInitialMatch("guided"), currentRound: 2 });
-    expect(createRestartMatch(done)).toEqual(createInitialMatch("standard"));
+    const restarted = createRestartMatch(done);
+    expect(restarted).toEqual(
+      createInitialMatch("standard", { seed: restarted.seed }),
+    );
     expect(createRestartMatch(createInitialMatch("standard")).mode).toBe("standard");
   });
 });

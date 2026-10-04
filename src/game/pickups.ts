@@ -1,5 +1,6 @@
 import { PICKUPS_PER_ROUND, PICKUP_VALUES } from "./constants";
 import { copyTile, listOpenTiles } from "./board";
+import { shuffle, type RandomSource } from "./random";
 import type { BoardState, Pickup, PickupValue, TilePosition } from "./types";
 
 export function createRoundPickups(
@@ -7,6 +8,7 @@ export function createRoundPickups(
   occupiedTiles: TilePosition[],
   existingPickups: Pickup[] = [],
   round = 1,
+  random: RandomSource,
 ): Pickup[] {
   const carriedPickups = existingPickups.map(copyPickup);
 
@@ -21,6 +23,7 @@ export function createRoundPickups(
       ...carriedPickups.map((pickup) => pickup.tile),
     ]),
     missingValues.length,
+    random,
   );
   const replacementPickups = selectedTiles.map((tile, index) => ({
     id: `pickup-r${round}-${index + 1}`,
@@ -61,19 +64,14 @@ function copyPickup(pickup: Pickup): Pickup {
   };
 }
 
-function takeRandomTiles(tiles: TilePosition[], count: number): TilePosition[] {
+function takeRandomTiles(
+  tiles: TilePosition[],
+  count: number,
+  random: RandomSource,
+): TilePosition[] {
   if (tiles.length < count) {
     throw new Error(`Unable to place ${count} pickups on valid empty tiles.`);
   }
 
-  const shuffled = tiles.map(copyTile);
-
-  for (let index = shuffled.length - 1; index > 0; index -= 1) {
-    const swapIndex = Math.floor(Math.random() * (index + 1));
-    const current = shuffled[index];
-    shuffled[index] = shuffled[swapIndex];
-    shuffled[swapIndex] = current;
-  }
-
-  return shuffled.slice(0, count);
+  return shuffle(tiles, random).slice(0, count).map(copyTile);
 }
