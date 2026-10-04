@@ -1,6 +1,6 @@
 # Daily Duel
 
-One shared board per UTC date, played locally. Wavedash leaderboard submission is out of scope (Task 10). Code: `src/game/daily.ts`.
+One shared board per UTC date, played locally. Online ranking on Wavedash is described in `docs/DAILY_LEADERBOARD.md`; the local ranking below is separate. Code: `src/game/daily.ts`.
 
 ## Seed scheme
 

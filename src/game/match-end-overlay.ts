@@ -1,4 +1,5 @@
 import type { DailyBoardStatus, DailyRankSummary } from "./daily";
+import type { DailySubmission } from "./daily-leaderboard";
 import { ACHIEVEMENT_TITLES } from "./mastery";
 import type { AchievementId, MasterySyncState } from "./mastery";
 import { deriveRoundStories, pickBestRound } from "./match-story";
@@ -53,6 +54,8 @@ export interface MatchCompleteOverlayOptions {
   dailyRank?: DailyRankSummary | null;
   /** Whether the Daily Duel board is still today's. */
   dailyStatus?: DailyBoardStatus | null;
+  /** Wavedash leaderboard submission of this Daily Duel attempt, once started. */
+  dailyOnline?: DailySubmission | null;
   /** Achievements this match unlocked for the first time on this device, and whether Wavedash has them. */
   mastery?: { unlocked: AchievementId[]; sync: MasterySyncState } | null;
 }
@@ -207,7 +210,59 @@ function describeDailyRows(
     });
   }
 
+  rows.push(...describeOnlineRows(options.dailyOnline));
+
   return rows;
+}
+
+/**
+ * Online ranking on Wavedash. The attempt just played and the saved best are
+ * separate rows: with keepBest a worse run leaves the saved best untouched.
+ */
+function describeOnlineRows(online: DailySubmission | null | undefined): MatchCompleteScoreRow[] {
+  const casual: MatchCompleteScoreRow = {
+    label: "ONLINE RANK",
+    value: "CASUAL, CLIENT-REPORTED",
+    tone: "neutral",
+  };
+
+  switch (online?.state) {
+    case undefined:
+      return [];
+    case "pending":
+      return [{ label: "ONLINE RANK", value: "SUBMITTING...", tone: "neutral" }];
+    case "local":
+      return [
+        { label: "ONLINE RANK", value: "NOT SUBMITTED - SIGN IN ON WAVEDASH", tone: "neutral" },
+      ];
+    case "board-missing":
+      return [{ label: "ONLINE RANK", value: "TODAY'S ONLINE BOARD IS NOT OPEN YET", tone: "neutral" }];
+    case "failed":
+      return [{ label: "ONLINE RANK", value: "SUBMIT FAILED - NOT RANKED", tone: "neutral" }];
+    case "submitted": {
+      const rows = [casual];
+      const { attempt, best } = online;
+
+      if (attempt) {
+        rows.push({
+          label: "THIS ATTEMPT",
+          value: `${formatSigned(attempt.score)}  RANK #${attempt.rank}`,
+          tone: "neutral",
+        });
+      }
+
+      if (best) {
+        const kept = attempt !== undefined && best.score !== attempt.score;
+        rows.push({
+          label: "SAVED BEST",
+          value: `${formatSigned(best.score)}  RANK #${best.rank}${kept ? " (KEPT)" : ""}`,
+          tone: "player",
+        });
+      }
+
+      return rows;
+    }
+  }
 }
 
 function describeNextTarget(match: MatchState, options: MatchCompleteOverlayOptions): string {
