@@ -144,8 +144,8 @@ export function isPlayerQueueReady(round: RoundState): boolean {
 export function lockRoundQueues(round: RoundState): RoundState {
   const rivalPlan = planRivalTurn(round.board, round.rival.tile, round.pickups, {
     playerTile: round.player.tile,
-    playerQueue: round.playerQueue,
     priorityOwner: round.priorityOwner,
+    seed: round.round,
   });
 
   return {
