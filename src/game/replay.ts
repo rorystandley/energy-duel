@@ -57,6 +57,8 @@ export interface ReplayRecord {
   rulesVersion: number;
   seed: number;
   mode: MatchMode;
+  /** UTC date of a Daily Duel attempt; absent for other modes. */
+  dailyDate?: string;
   rounds: ReplayRound[];
   /** Present once the match has finished; absent for an in-progress record. */
   result?: ReplayResult;
@@ -78,6 +80,7 @@ export function createReplay(match: MatchState): ReplayRecord {
     rulesVersion: match.rulesVersion,
     seed: match.seed,
     mode: match.mode,
+    ...(match.dailyDate ? { dailyDate: match.dailyDate } : {}),
     rounds: [],
   };
 }
@@ -277,7 +280,7 @@ function isMoveList(value: unknown, length: number): boolean {
 function isValidShape(data: Record<string, unknown>): data is Record<string, unknown> & ReplayRecord {
   if (
     !Number.isInteger(data.seed) ||
-    (data.mode !== "standard" && data.mode !== "guided") ||
+    (data.mode !== "standard" && data.mode !== "guided" && data.mode !== "daily") ||
     !Array.isArray(data.rounds)
   ) {
     return false;

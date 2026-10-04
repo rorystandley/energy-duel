@@ -35,6 +35,8 @@ interface RoundSetupOptions {
 
 export interface MatchOptions {
   seed?: number;
+  /** UTC date of a Daily Duel; ignored for other modes. */
+  dailyDate?: string;
 }
 
 export function createInitialMatch(
@@ -45,6 +47,9 @@ export function createInitialMatch(
     mode,
     seed: options.seed ?? createMatchSeed(),
     rulesVersion: RULES_VERSION,
+    ...(mode === "daily" && options.dailyDate
+      ? { dailyDate: options.dailyDate }
+      : {}),
     currentRound: 1,
     totalRounds: getModeRules(mode).totalRounds,
     playerScore: 0,
@@ -79,10 +84,13 @@ export function createRestartMatch(
 
 /** Same board seed and mode as `match`, with every score and choice reset. */
 export function createRematchMatch(match: MatchState): MatchState {
-  return createInitialMatch(match.mode, { seed: match.seed });
+  return createInitialMatch(match.mode, {
+    seed: match.seed,
+    dailyDate: match.dailyDate,
+  });
 }
 
-/** A fresh-seed match (guided intros become Standard), guaranteed to differ from `match`'s seed. */
+/** A fresh-seed Standard match (guided intros and Daily Duels become Standard), guaranteed to differ from `match`'s seed. */
 export function createNewBoardMatch(
   match: MatchState,
   nextSeed: () => number = createMatchSeed,
@@ -97,9 +105,8 @@ export function createNewBoardMatch(
     seed = deriveSeed(match.seed, "new-board");
   }
 
-  return createInitialMatch(match.mode === "guided" ? "standard" : match.mode, {
-    seed,
-  });
+  // A random board is never the shared daily board, so it plays as Standard.
+  return createInitialMatch("standard", { seed });
 }
 
 export function createRoundState(

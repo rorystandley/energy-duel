@@ -23,6 +23,11 @@ const MODE_RULES: Record<MatchMode, ModeRules> = {
     totalRounds: TOTAL_ROUNDS,
     movesForRound: () => MOVES_PER_ROUND,
   },
+  // Daily Duel plays the Standard length; only the seed source differs.
+  daily: {
+    totalRounds: TOTAL_ROUNDS,
+    movesForRound: () => MOVES_PER_ROUND,
+  },
   guided: {
     totalRounds: 2,
     movesForRound: (round) => (round <= 1 ? 4 : MOVES_PER_ROUND),

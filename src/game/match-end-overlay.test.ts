@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 
+import { createDailyMatch } from "./daily";
 import { createMatchCompleteOverlayModel } from "./match-end-overlay";
 import { createInitialMatch, finishRound } from "./match-flow";
 import { MOVES } from "./constants";
@@ -77,6 +78,7 @@ describe("match-complete scene overlay smoke", () => {
     ).toEqual([
       { id: "rematch", label: "REMATCH THIS BOARD" },
       { id: "new-board", label: "NEW BOARD" },
+      { id: "daily", label: "DAILY DUEL" },
       { id: "replay", label: "WATCH REPLAY" },
       { id: "share", label: "SHARE RESULT" },
     ]);
@@ -136,5 +138,58 @@ describe("guided duel completion", () => {
 
     expect(model.resultSubtitle).toMatch(/guided/i);
     expect(model.resultSubtitle).toMatch(/standard/i);
+  });
+});
+
+describe("Daily Duel end screen", () => {
+  const daily = (date: string): MatchState => ({
+    ...createDailyMatch(date),
+    status: "match-complete",
+    playerScore: 11,
+    rivalScore: 7,
+    winner: "player",
+  });
+  const rank = {
+    date: "2026-10-04",
+    rulesVersion: 1,
+    playerScore: 11,
+    rivalScore: 7,
+    margin: 4,
+    rank: 2,
+    attempts: 3,
+    tiedWith: 0,
+    bestMargin: 6,
+  };
+
+  it("shows the board date, rules version, rank and both scores", () => {
+    const overlay = createMatchCompleteOverlayModel(daily("2026-10-04"), {
+      dailyRank: rank,
+      dailyStatus: { boardDate: "2026-10-04", today: "2026-10-04", isToday: true },
+    });
+
+    expect(overlay.dailyRows).toEqual([
+      { label: "DAILY BOARD", value: "2026-10-04  RULES v1", tone: "neutral" },
+      { label: "LOCAL RANK", value: "#2 of 3", tone: "neutral" },
+    ]);
+    expect(overlay.scoreRows.map((row) => row.value)).toEqual(["11", "7", "+4"]);
+    expect(overlay.shareText).toContain("Daily 2026-10-04: 11-7 (+4)");
+    expect(overlay.actions.map((action) => action.id)).not.toContain("daily");
+  });
+
+  it("explains a run that finished after midnight and offers today's board", () => {
+    const overlay = createMatchCompleteOverlayModel(daily("2026-10-04"), {
+      dailyRank: rank,
+      dailyStatus: { boardDate: "2026-10-04", today: "2026-10-05", isToday: false },
+    });
+
+    expect(overlay.nextTarget).toContain("Counted for 2026-10-04");
+    expect(overlay.actions.map((action) => action.id)).toContain("daily");
+  });
+
+  it("offers the Daily Duel from a Standard result", () => {
+    const overlay = createMatchCompleteOverlayModel(completeMatch(5, 3));
+
+    expect(overlay.dailyRows).toEqual([]);
+    expect(overlay.actions.map((action) => action.id)).toContain("daily");
   });
 });

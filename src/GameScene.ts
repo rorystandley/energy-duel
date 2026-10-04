@@ -27,6 +27,16 @@ import {
   startNextRound,
 } from "./game/match-flow";
 import { createMatchCompleteOverlayModel } from "./game/match-end-overlay";
+import {
+  bestDailyAttempt,
+  createDailyMatch,
+  dailyBoardStatus,
+  loadDailyHistory,
+  recordDailyAttempt,
+  saveDailyHistory,
+  utcDateString,
+} from "./game/daily";
+import type { DailyHistory, DailyRankSummary } from "./game/daily";
 import { findDebugReplay } from "./game/debug-match";
 import { deriveMatchStats, getPickupCollector } from "./game/match-story";
 import {
@@ -163,6 +173,11 @@ export class GameScene extends Phaser.Scene {
   private replayView: ReplayViewState | null = null;
   private replayFrame: ReplayFrame | null = null;
   private shareCopied = false;
+  /** Local Daily Duel attempts; saved to localStorage after each finished attempt. */
+  private dailyHistory: DailyHistory = { attempts: [] };
+  private dailyHistoryWritable = false;
+  /** Rank of the Daily Duel attempt that just finished; null for any other match. */
+  private dailyRank: DailyRankSummary | null = null;
   private backdrop?: Phaser.GameObjects.Graphics;
 
   constructor() {
@@ -176,6 +191,9 @@ export class GameScene extends Phaser.Scene {
       seed: this.match.seed,
     });
     this.replay = createReplay(this.match);
+    const savedDaily = loadDailyHistory(this.safeStorage());
+    this.dailyHistory = savedDaily.history;
+    this.dailyHistoryWritable = savedDaily.writable;
     this.rulesOverlayMode = this.hasSeenOnboarding() ? null : "welcome";
 
     this.refreshLayout();
@@ -310,6 +328,7 @@ export class GameScene extends Phaser.Scene {
         this.openReplay("round");
       }
     });
+    keyboard.on("keydown-T", () => this.startDailyDuel());
     keyboard.on("keydown-K", () => {
       if (!this.replayView) {
         this.skipToStandardMatch();
@@ -433,6 +452,7 @@ export class GameScene extends Phaser.Scene {
     this.roundSummary = null;
     this.replayView = null;
     this.shareCopied = false;
+    this.dailyRank = null;
     this.lockedRound = undefined;
     this.match = match;
     this.round = createRoundState(match.currentRound, {
@@ -442,6 +462,47 @@ export class GameScene extends Phaser.Scene {
     this.replay = createReplay(match);
     this.lastCollisionWinner = null;
     this.render();
+  }
+
+  /** Starts an attempt on the board for the current UTC date; the date is fixed for the attempt. */
+  private startDailyDuel(): void {
+    const freshStart =
+      this.match.status === "queuing" &&
+      this.match.currentRound === 1 &&
+      this.round.playerQueue.length === 0;
+
+    if (this.replayView || (!freshStart && !this.canLeaveMatchEnd())) {
+      return;
+    }
+
+    this.beginMatch(createDailyMatch(utcDateString()));
+  }
+
+  private startDailyFromRules(): void {
+    if (this.match.status === "executing") {
+      return;
+    }
+
+    this.hideRulesOverlay();
+    this.startDailyDuel();
+  }
+
+  private completeDailyAttempt(): void {
+    const { history, summary } = recordDailyAttempt(this.dailyHistory, this.match);
+
+    this.dailyHistory = history;
+    this.dailyRank = summary;
+    saveDailyHistory(this.safeStorage(), history, this.dailyHistoryWritable);
+  }
+
+  private dailyOverlayOptions(): {
+    dailyRank: DailyRankSummary | null;
+    dailyStatus: ReturnType<typeof dailyBoardStatus>;
+  } {
+    return {
+      dailyRank: this.dailyRank,
+      dailyStatus: dailyBoardStatus(this.match),
+    };
   }
 
   private skipToStandardMatch(): void {
@@ -665,6 +726,10 @@ export class GameScene extends Phaser.Scene {
 
     if (this.match.status === "match-complete") {
       this.replay = finalizeReplay(this.replay, this.match);
+    }
+
+    if (this.match.status === "match-complete" && this.match.mode === "daily") {
+      this.completeDailyAttempt();
     }
 
     if (this.match.status === "match-complete" && this.match.mode === "guided") {
@@ -1012,6 +1077,9 @@ export class GameScene extends Phaser.Scene {
       case "standard":
         this.startStandardMatch();
         break;
+      case "daily":
+        this.startDailyDuel();
+        break;
       case "replay":
         this.openReplay("match");
         break;
@@ -1087,6 +1155,7 @@ export class GameScene extends Phaser.Scene {
 
     const { shareText } = createMatchCompleteOverlayModel(this.match, {
       replay: this.replay,
+      ...this.dailyOverlayOptions(),
     });
 
     this.shareCopied = await copyToClipboard(shareText);
@@ -2122,8 +2191,60 @@ export class GameScene extends Phaser.Scene {
     this.drawQueueReadout();
     this.drawControls();
     this.drawGuideSkip();
+    this.drawDailyPanel();
     this.drawGuideCoach();
     this.drawRoundSummaryOverlay();
+  }
+
+  private drawDailyPanel(): void {
+    if (this.rulesOverlayVisible) {
+      return;
+    }
+
+    const x = LEFT_PANEL_X;
+    const y = BOARD_ORIGIN.y + 205;
+
+    if (this.match.mode === "daily" && this.match.dailyDate) {
+      const status = dailyBoardStatus(this.match);
+      const best = bestDailyAttempt(
+        this.dailyHistory,
+        this.match.dailyDate,
+        this.match.rulesVersion,
+      );
+
+      this.drawReadoutLine(x, y, `DAILY DUEL ${this.match.dailyDate}`, TRON_THEME.textAmber, "13px", "800");
+      this.drawReadoutLine(x, y + 20, `RULES v${this.match.rulesVersion} - FREE PRACTICE`, TRON_THEME.textMuted, "11px", "700");
+      this.drawReadoutLine(
+        x,
+        y + 38,
+        best ? `BEST ${formatMargin(best.margin)} (${best.playerScore}-${best.rivalScore})` : "NO ATTEMPT YET",
+        TRON_THEME.textMuted,
+        "11px",
+        "700",
+      );
+
+      if (status && !status.isToday) {
+        this.drawReadoutLine(x, y + 56, `COUNTS FOR ${status.boardDate}`, this.cssColor(TRON_THEME.rival), "11px", "800");
+      }
+
+      return;
+    }
+
+    if (this.match.mode === "standard") {
+      this.drawButton(
+        x,
+        y,
+        SIDE_PANEL_WIDTH,
+        30,
+        "DAILY DUEL (T)",
+        this.match.status === "queuing" &&
+          this.match.currentRound === 1 &&
+          this.round.playerQueue.length === 0,
+        () => this.startDailyDuel(),
+        0.2,
+        "12px",
+      );
+    }
   }
 
   private drawGuideSkip(): void {
@@ -2871,6 +2992,7 @@ export class GameScene extends Phaser.Scene {
     const wide = compact?.kind === "landscape";
     const overlay = createMatchCompleteOverlayModel(this.match, {
       replay: this.replay,
+      ...this.dailyOverlayOptions(),
     });
     const resultStyle = this.finalResultStyle(overlay.resultLabel);
     const pad = 26;
@@ -2888,7 +3010,7 @@ export class GameScene extends Phaser.Scene {
     const stackedActions = wide;
     const lowerActions = actions.slice(1);
     // Phones get at most two buttons per row so every label stays readable.
-    const perRow = compact ? 2 : Math.max(1, lowerActions.length);
+    const perRow = compact || lowerActions.length > 3 ? 2 : Math.max(1, lowerActions.length);
     const lowerRows = Math.ceil(lowerActions.length / perRow);
     const actionsHeight = stackedActions
       ? actions.length * buttonH + (actions.length - 1) * buttonGap
@@ -3984,7 +4106,10 @@ export class GameScene extends Phaser.Scene {
     const step = this.activeStepVisual?.step;
     const playerDelta = step?.playerScoreDelta ?? 0;
     const rivalDelta = step?.rivalScoreDelta ?? 0;
-    const round = `ROUND ${this.match.currentRound} / ${this.match.totalRounds}`;
+    const round =
+      this.match.mode === "daily" && this.match.dailyDate
+        ? `DAILY ${this.match.dailyDate.slice(5)} R${this.match.currentRound}/${this.match.totalRounds}`
+        : `ROUND ${this.match.currentRound} / ${this.match.totalRounds}`;
     const owner = this.round.priorityOwner;
 
     if (landscape) {
@@ -4566,7 +4691,7 @@ export class GameScene extends Phaser.Scene {
     const last = page === pages.length - 1;
 
     this.drawButton(x + 16, footerY, third, buttonH, "BACK", page > 0, () => this.turnRulesPage(-1), depth + 0.3, "14px");
-    this.drawButton(x + 24 + third, footerY, third, buttonH, last ? "DONE" : "NEXT", true, () => (last ? this.hideRulesOverlay() : this.turnRulesPage(1)), depth + 0.3, "14px");
+    this.drawButton(x + 24 + third, footerY, third, buttonH, last ? "DAILY DUEL" : "NEXT", last ? this.match.status !== "executing" : true, () => (last ? this.startDailyFromRules() : this.turnRulesPage(1)), depth + 0.3, last ? "12px" : "14px");
     this.drawButton(x + 32 + third * 2, footerY, third, buttonH, "CLOSE", true, () => this.hideRulesOverlay(), depth + 0.3, "14px");
   }
 
@@ -4602,4 +4727,8 @@ async function copyToClipboard(text: string): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+function formatMargin(value: number): string {
+  return value > 0 ? `+${value}` : String(value);
 }

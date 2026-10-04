@@ -48,7 +48,7 @@ Each round stores the board and pickups as they stood at lock time, both queues,
 
 ## Out of scope
 
-Daily Duel and Wavedash score or UGC submission.
+Wavedash score or UGC submission. Daily Duel seeding is in `docs/DAILY_DUEL.md`; daily records use `"mode": "daily"` plus a `dailyDate` field.
 
 ## Viewer and rematch
 
