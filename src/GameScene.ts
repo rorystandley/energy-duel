@@ -34,6 +34,7 @@ import {
   loadDailyHistory,
   recordDailyAttempt,
   saveDailyHistory,
+  withBetterDailyAttempt,
   utcDateString,
 } from "./game/daily";
 import type { DailyHistory, DailyRankSummary } from "./game/daily";
@@ -58,6 +59,12 @@ import { getGuideCoach } from "./game/guide-coach";
 import { computeLayout, isCompact } from "./game/layout";
 import type { CompactLayout, GameLayout, Rect } from "./game/layout";
 import { recordGuideOutcome } from "./game/onboarding-progress";
+import { restoreMatch, snapshotMatch } from "./game/resume";
+import type { RestoredMatch } from "./game/resume";
+import { SaveManager } from "./game/save-sync";
+import type { SaveChange } from "./game/save-sync";
+import type { SaveData } from "./game/save";
+import { ONBOARDING_STORAGE_KEY } from "./game/storage-keys";
 import { createMovePreview } from "./game/preview";
 import {
   createReplay,
@@ -110,7 +117,6 @@ const PREVIEW_LINE_WIDTH = Math.max(4, Math.round(CELL_SIZE * 0.08));
 const QUEUE_ROW_GAP = 22;
 const ZERO_ORIGIN = { x: 0, y: 0 } as const;
 const MIN_BOARD_TEXT_PX = 11;
-const ONBOARDING_STORAGE_KEY = "energy-duel:onboarding-seen";
 const ONBOARDING_FADE_MS = 280;
 const SHOW_RIVAL_MOOD_DEBUG =
   import.meta.env.VITE_DEBUG_RIVAL_MOOD === "true";
@@ -128,7 +134,7 @@ interface ExecutionStepVisual {
 }
 
 type VolumeSliderKind = "music" | "sfx";
-type RulesOverlayMode = "welcome" | "rules";
+type RulesOverlayMode = "welcome" | "rules" | "resume";
 
 interface ActiveVolumeSlider {
   kind: VolumeSliderKind;
@@ -186,6 +192,10 @@ export class GameScene extends Phaser.Scene {
   /** Increments per match started, so a rematch on the same seed still counts as its own match. */
   private matchSerial = 0;
   private mastery!: MasteryTracker;
+  /** The player's versioned save: local first, mirrored to the Wavedash cloud in the background. */
+  private saves!: SaveManager;
+  /** A saved match waiting for the player to resume it or start fresh. */
+  private resumeOffer: RestoredMatch | null = null;
   private dailyBoard!: DailyLeaderboardSubmitter;
   /** Achievements unlocked by the match now on the end screen. */
   private matchUnlocks: AchievementId[] = [];
@@ -197,6 +207,7 @@ export class GameScene extends Phaser.Scene {
 
   create(): void {
     this.sceneStartedAt = performance.now();
+    this.createSaves();
     this.mastery = new MasteryTracker({
       sink: wavedash,
       storage: this.safeStorage(),
@@ -224,10 +235,17 @@ export class GameScene extends Phaser.Scene {
     const savedDaily = loadDailyHistory(this.safeStorage());
     this.dailyHistory = savedDaily.history;
     this.dailyHistoryWritable = savedDaily.writable;
+    this.applySaveToGame(this.saves.current, {
+      preferences: true,
+      progress: true,
+      dailyBests: true,
+      inProgress: false,
+    });
     this.rulesOverlayMode = this.hasSeenOnboarding() ? null : "welcome";
+    this.offerSavedMatch();
 
     this.refreshLayout();
-    if (this.rulesOverlayVisible) {
+    if (this.rulesOverlayMode === "welcome") {
       this.registerOnboardingInput();
     } else {
       this.registerInput();
@@ -235,11 +253,18 @@ export class GameScene extends Phaser.Scene {
     this.registerAudioStartInput();
     this.registerAudioSettingsInput();
     this.scale.on("resize", this.handleResize, this);
+    const flushOnHide = () => {
+      if (document.visibilityState === "hidden") void this.saves.flush();
+    };
+    document.addEventListener("visibilitychange", flushOnHide);
     this.events.once("shutdown", () => {
+      document.removeEventListener("visibilitychange", flushOnHide);
       this.scale.off("resize", this.handleResize, this);
       this.audio.destroy();
     });
     this.render();
+    // After the first render, so reading and uploading the cloud save never delays the first frame.
+    this.saves.start();
   }
 
   private get compact(): CompactLayout | null {
@@ -329,6 +354,11 @@ export class GameScene extends Phaser.Scene {
     keyboard.on("keydown-DELETE", () => this.clearQueue());
     keyboard.on("keydown-C", () => this.clearQueue());
     keyboard.on("keydown-ENTER", () => {
+      if (this.resumeOffer) {
+        this.acceptResume();
+        return;
+      }
+
       if (this.replayView) {
         this.closeReplay();
         return;
@@ -345,6 +375,11 @@ export class GameScene extends Phaser.Scene {
       }
     });
     keyboard.on("keydown-N", () => {
+      if (this.resumeOffer) {
+        this.declineResume();
+        return;
+      }
+
       if (this.match.mode === "guided") {
         this.startStandardMatch();
       } else {
@@ -449,6 +484,11 @@ export class GameScene extends Phaser.Scene {
       return;
     }
 
+    if (this.rulesOverlayMode === "resume") {
+      // Resuming or starting fresh is a real choice; ESC and stray keys do not make it.
+      return;
+    }
+
     if (this.rulesOverlayMode === "welcome") {
       this.beginFromWelcome("guided");
       return;
@@ -466,7 +506,7 @@ export class GameScene extends Phaser.Scene {
     this.registerInput();
 
     if (mode === "standard") {
-      recordGuideOutcome(this.safeStorage(), "skipped");
+      this.recordTutorialOutcome("skipped");
     }
 
     this.startMatch(mode);
@@ -477,7 +517,7 @@ export class GameScene extends Phaser.Scene {
   }
 
   /** Replaces the whole match, including the round, replay record and any open viewer. */
-  private beginMatch(match: MatchState): void {
+  private beginMatch(match: MatchState, restored?: RestoredMatch): void {
     this.stopExecutionEffects();
     this.roundSummary = null;
     this.replayView = null;
@@ -487,12 +527,20 @@ export class GameScene extends Phaser.Scene {
     this.match = match;
     this.matchSerial += 1;
     this.matchUnlocks = [];
-    this.round = createRoundState(match.currentRound, {
-      mode: match.mode,
-      seed: match.seed,
-    });
-    this.replay = createReplay(match);
+    this.round =
+      restored?.round ??
+      createRoundState(match.currentRound, {
+        mode: match.mode,
+        seed: match.seed,
+      });
+    this.replay = restored?.replay ?? createReplay(match);
     this.lastCollisionWinner = null;
+
+    if (!restored) {
+      // Starting anything else abandons the saved match; the clear is itself a saved change.
+      this.saves.setInProgress(null);
+    }
+
     this.render();
   }
 
@@ -503,7 +551,7 @@ export class GameScene extends Phaser.Scene {
       this.match.currentRound === 1 &&
       this.round.playerQueue.length === 0;
 
-    if (this.replayView || (!freshStart && !this.canLeaveMatchEnd())) {
+    if (this.resumeOffer || this.replayView || (!freshStart && !this.canLeaveMatchEnd())) {
       return;
     }
 
@@ -525,6 +573,16 @@ export class GameScene extends Phaser.Scene {
     this.dailyHistory = history;
     this.dailyRank = summary;
     saveDailyHistory(this.safeStorage(), history, this.dailyHistoryWritable);
+
+    if (summary) {
+      this.saves.recordDailyBest({
+        date: summary.date,
+        rulesVersion: summary.rulesVersion,
+        playerScore: summary.playerScore,
+        rivalScore: summary.rivalScore,
+        margin: summary.margin,
+      });
+    }
   }
 
   private dailyOverlayOptions(): {
@@ -550,7 +608,7 @@ export class GameScene extends Phaser.Scene {
       return;
     }
 
-    recordGuideOutcome(this.safeStorage(), "skipped");
+    this.recordTutorialOutcome("skipped");
     this.beginMatch(skipGuidedIntro(this.match));
   }
 
@@ -560,6 +618,275 @@ export class GameScene extends Phaser.Scene {
     } catch {
       return undefined;
     }
+  }
+
+  private createSaves(): void {
+    this.saves = new SaveManager({
+      storage: this.safeStorage(),
+      cloud: {
+        readFile: (path) => wavedash.readCloudFile(path),
+        writeFile: (path, text) => wavedash.writeCloudFile(path, text),
+      },
+      ready: () => wavedash.initialize(),
+      onRemoteChange: (save, change) => this.handleRemoteSave(save, change),
+    });
+    this.saves.load();
+    this.audio.onSettingsChanged = (settings) => this.saves.setPreferences(settings);
+  }
+
+  /** Writes the parts of a save that changed into the stores the game reads at runtime. */
+  private applySaveToGame(save: SaveData, change: SaveChange): void {
+    const preferences = save.preferences.value;
+
+    if (change.preferences && preferences) {
+      const current = this.audio.getSettings();
+
+      if (
+        current.musicVolume !== preferences.musicVolume ||
+        current.sfxVolume !== preferences.sfxVolume ||
+        current.muted !== preferences.muted
+      ) {
+        this.audio.applySettings(preferences);
+      }
+    }
+
+    if (change.progress) {
+      if (save.progress.onboardingSeen) {
+        this.rememberOnboardingSeen();
+      }
+
+      if (save.progress.tutorial) {
+        recordGuideOutcome(this.safeStorage(), save.progress.tutorial);
+      }
+    }
+
+    if (change.dailyBests) {
+      let history = this.dailyHistory;
+
+      for (const best of save.bests.daily) {
+        history = withBetterDailyAttempt(history, best);
+      }
+
+      if (history !== this.dailyHistory) {
+        this.dailyHistory = history;
+        saveDailyHistory(this.safeStorage(), history, this.dailyHistoryWritable);
+      }
+    }
+  }
+
+  /** A cloud merge changed the save while the game is running. Never interrupts a match in progress. */
+  private handleRemoteSave(save: SaveData, change: SaveChange): void {
+    this.applySaveToGame(save, change);
+
+    if (change.inProgress) {
+      this.reconsiderResumeOffer(save);
+    } else if (change.dailyBests || change.preferences) {
+      this.renderIfNotExecuting();
+    }
+  }
+
+  private recordTutorialOutcome(outcome: "completed" | "skipped"): void {
+    recordGuideOutcome(this.safeStorage(), outcome);
+    this.saves.recordTutorial(outcome);
+  }
+
+  /** Saves at a round boundary only: the round has fully resolved and been recorded. */
+  private saveAtRoundBoundary(): void {
+    const match = this.match;
+
+    if (match.mode === "guided") {
+      return;
+    }
+
+    if (match.status === "round-complete") {
+      this.saves.setInProgress(snapshotMatch(match, this.replay));
+    } else if (match.status === "match-complete") {
+      this.saves.setInProgress(null);
+
+      if (match.mode === "standard") {
+        this.saves.recordStandardBest({
+          rulesVersion: match.rulesVersion,
+          playerScore: match.playerScore,
+          rivalScore: match.rivalScore,
+        });
+      }
+    }
+  }
+
+  /**
+   * A saved match that cannot be reproduced (rules changed, or written by a
+   * newer build) is left alone rather than offered or erased: the next round
+   * boundary or new match overwrites it.
+   */
+  private restorableSave(save: SaveData): RestoredMatch | null {
+    const saved = save.inProgress.value;
+
+    if (!saved) {
+      return null;
+    }
+
+    const restored = restoreMatch(saved);
+
+    if (!restored) {
+      console.warn("[Energy Duel] saved match cannot be resumed with these rules; ignoring it");
+    }
+
+    return restored;
+  }
+
+  private offerSavedMatch(): void {
+    const restored = this.restorableSave(this.saves.current);
+
+    if (restored) {
+      this.resumeOffer = restored;
+      this.rulesOverlayMode = "resume";
+    }
+  }
+
+  /** True while the player is still on the untouched start screen. */
+  private isPristineStart(): boolean {
+    return (
+      this.match.mode === "standard" &&
+      this.match.status === "queuing" &&
+      this.match.currentRound === 1 &&
+      this.round.playerQueue.length === 0 &&
+      this.replayView === null &&
+      this.compactPanel === null &&
+      (this.rulesOverlayMode === null || this.rulesOverlayMode === "welcome")
+    );
+  }
+
+  private reconsiderResumeOffer(save: SaveData): void {
+    if (this.resumeOffer) {
+      // The prompt is still open: follow the newest save.
+      const restored = this.restorableSave(save);
+
+      if (restored) {
+        this.resumeOffer = restored;
+      } else if (!save.inProgress.value) {
+        this.resumeOffer = null;
+        this.rulesOverlayMode = null;
+      }
+
+      this.renderIfNotExecuting();
+      return;
+    }
+
+    if (!this.isPristineStart()) {
+      return;
+    }
+
+    const restored = this.restorableSave(save);
+
+    if (restored) {
+      this.stopVolumeSliderDrag();
+      this.resumeOffer = restored;
+      this.rulesOverlayMode = "resume";
+      this.registerInput();
+      this.render();
+    }
+  }
+
+  private acceptResume(): void {
+    const restored = this.resumeOffer;
+
+    if (!restored) {
+      return;
+    }
+
+    this.resumeOffer = null;
+    this.rulesOverlayMode = null;
+    this.rememberOnboardingSeen();
+    this.registerInput();
+    this.beginMatch(restored.match, restored);
+  }
+
+  private declineResume(): void {
+    if (!this.resumeOffer) {
+      return;
+    }
+
+    this.resumeOffer = null;
+    this.rulesOverlayMode = null;
+    this.rememberOnboardingSeen();
+    this.registerInput();
+    this.saves.setInProgress(null);
+    this.render();
+  }
+
+  private drawResumePrompt(): void {
+    const offer = this.resumeOffer;
+
+    if (!offer) {
+      return;
+    }
+
+    const depth = 20;
+    const compact = this.compact;
+    const stageWidth = compact ? compact.width : GAME_WIDTH;
+    const stageHeight = compact ? compact.height : GAME_HEIGHT;
+    const width = Math.min(stageWidth - 16, 440);
+    const height = 250;
+    const x = (stageWidth - width) / 2;
+    const y = (stageHeight - height) / 2;
+    const inner = width - 32;
+    const { match } = offer;
+    const modeLabel =
+      match.mode === "daily" && match.dailyDate
+        ? `DAILY DUEL ${match.dailyDate}`
+        : "STANDARD MATCH";
+    const shade = this.track(this.add.graphics());
+    const panel = this.track(this.add.graphics());
+    const blocker = this.track(this.add.zone(0, 0, stageWidth, stageHeight).setOrigin(0));
+
+    shade.setDepth(depth);
+    shade.fillStyle(0x01040a, 0.86);
+    shade.fillRect(0, 0, stageWidth, stageHeight);
+    blocker.setDepth(depth + 0.05);
+    blocker.setInteractive();
+
+    panel.setDepth(depth + 0.1);
+    panel.fillStyle(0x03111d, 0.98);
+    panel.fillRoundedRect(x, y, width, height, 8);
+    panel.lineStyle(3, TRON_THEME.player, 0.8);
+    panel.strokeRoundedRect(x, y, width, height, 8);
+
+    this.compactText(x + width / 2, y + 18, "RESUME YOUR MATCH?", TRON_THEME.textPrimary, 24, {
+      originX: 0.5,
+      weight: "900",
+      depth: depth + 0.2,
+    });
+    this.compactText(
+      x + width / 2,
+      y + 58,
+      `${modeLabel}  -  ROUND ${match.currentRound} OF ${match.totalRounds}`,
+      TRON_THEME.textAmber,
+      13,
+      { originX: 0.5, weight: "900", depth: depth + 0.2 },
+    );
+    this.compactText(
+      x + width / 2,
+      y + 86,
+      `YOU ${match.playerScore}   -   RIVAL ${match.rivalScore}`,
+      TRON_THEME.textPrimary,
+      20,
+      { originX: 0.5, weight: "900", depth: depth + 0.2 },
+    );
+    this.compactText(
+      x + 16,
+      y + 122,
+      "Saved after your last completed round. Starting a new match replaces it.",
+      TRON_THEME.textPrimary,
+      13,
+      { weight: "700", wrap: inner, depth: depth + 0.2 },
+    );
+
+    const buttonHeight = 48;
+    const half = (inner - 8) / 2;
+    const buttonY = y + height - buttonHeight - 16;
+
+    this.drawButton(x + 16, buttonY, half, buttonHeight, "RESUME", true, () => this.acceptResume(), depth + 0.3, "15px", true);
+    this.drawButton(x + 24 + half, buttonY, half, buttonHeight, "START NEW", true, () => this.declineResume(), depth + 0.3, "15px");
   }
 
   private toggleRulesOverlay(): void {
@@ -585,6 +912,8 @@ export class GameScene extends Phaser.Scene {
     } catch {
       // Storage can be unavailable in private contexts; the overlay still works.
     }
+
+    this.saves.markOnboardingSeen();
   }
 
   private addMove(move: Move): void {
@@ -775,8 +1104,10 @@ export class GameScene extends Phaser.Scene {
     }
 
     if (this.match.status === "match-complete" && this.match.mode === "guided") {
-      recordGuideOutcome(this.safeStorage(), "completed");
+      this.recordTutorialOutcome("completed");
     }
+
+    this.saveAtRoundBoundary();
 
     if (this.match.status === "round-complete") {
       this.roundSummary = deriveRoundSummary({
@@ -2353,6 +2684,11 @@ export class GameScene extends Phaser.Scene {
   }
 
   private drawRulesOverlay(): void {
+    if (this.rulesOverlayMode === "resume") {
+      this.drawResumePrompt();
+      return;
+    }
+
     const compact = this.compact;
 
     if (compact) {

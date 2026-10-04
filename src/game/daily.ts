@@ -140,6 +140,17 @@ export function recordDailyAttempt(
   return { history: { attempts }, summary: summarizeAttempt(attempts, attempt) };
 }
 
+/** Adds `attempt` only if it beats the best local result for its board (used when a synced save brings one in). */
+export function withBetterDailyAttempt(history: DailyHistory, attempt: DailyAttempt): DailyHistory {
+  const best = bestDailyAttempt(history, attempt.date, attempt.rulesVersion);
+
+  if (best && best.margin >= attempt.margin) {
+    return history;
+  }
+
+  return { attempts: [...history.attempts, attempt].slice(-MAX_STORED_ATTEMPTS) };
+}
+
 /** Best local result for a board, or null before any attempt. */
 export function bestDailyAttempt(
   history: DailyHistory,

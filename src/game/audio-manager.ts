@@ -1,3 +1,5 @@
+import { AUDIO_SETTINGS_STORAGE_KEY } from "./storage-keys";
+
 type AudioContextConstructor = new () => AudioContext;
 type AudioCue = "queue" | "move" | "pickupSmall" | "pickupBig" | "collision";
 
@@ -18,7 +20,6 @@ interface ToneOptions {
   delay?: number;
 }
 
-const AUDIO_SETTINGS_STORAGE_KEY = "energy-duel:audio-settings";
 const MUSIC_SOURCE = "./audio/background.mp3";
 const MASTER_GAIN = 0.42;
 const MIN_GAIN = 0.0001;
@@ -61,8 +62,23 @@ export class AudioManager {
   private readonly lastCueTime: Partial<Record<AudioCue, number>> = {};
   private settings: AudioSettings = this.loadSettings();
 
+  /** Called after the player changes a setting (not when settings are applied from a save). */
+  onSettingsChanged?: (settings: AudioSettings) => void;
+
   getSettings(): AudioSettings {
     return { ...this.settings };
+  }
+
+  /** Adopts settings from a synced save: updates playback and local storage without echoing back. */
+  applySettings(settings: AudioSettings): void {
+    this.settings = {
+      musicVolume: clampVolume(settings.musicVolume),
+      sfxVolume: clampVolume(settings.sfxVolume),
+      muted: settings.muted,
+    };
+    this.applyMusicVolume();
+    this.applySfxVolume();
+    this.writeSettings();
   }
 
   setMusicVolume(volume: number): void {
@@ -473,6 +489,11 @@ export class AudioManager {
   }
 
   private persistSettings(): void {
+    this.writeSettings();
+    this.onSettingsChanged?.({ ...this.settings });
+  }
+
+  private writeSettings(): void {
     if (typeof window === "undefined") {
       return;
     }
