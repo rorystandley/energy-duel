@@ -16,7 +16,7 @@ A neon, simultaneous turn-based strategy game built for **[Gamedev.js Jam 2026](
 
 Energy Duel is a competitive 1v1 robot strategy game played on a neon grid.
 
-You queue your moves. Your rival does the same. Then both machines execute simultaneously — no taking turns, no reaction time advantage. Pure strategy.
+You queue your moves. Your rival does the same. Then both machines execute simultaneously — no taking turns, no reaction time advantage. Pure strategy. The rival plans from the public board only (node values, robot positions, collision priority); it never sees your queue.
 
 Collect energy nodes, dodge collisions, and outscore your opponent across 5 rounds.
 

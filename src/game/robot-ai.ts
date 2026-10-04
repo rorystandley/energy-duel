@@ -18,8 +18,8 @@ import type {
 
 interface RivalPlanningContext {
   playerTile?: TilePosition;
-  playerQueue?: Move[];
   priorityOwner?: RobotId;
+  seed?: number;
 }
 
 interface PlayerPlan {
@@ -140,7 +140,6 @@ export function planRivalTurn(
   const playerPlan = createPlayerPlan(
     board,
     context.playerTile,
-    context.playerQueue ?? [],
     pickups,
   );
 
@@ -804,12 +803,13 @@ function getPredictedPlayerTile(
 function createPlayerPlan(
   board: BoardState,
   playerTile: TilePosition | undefined,
-  playerQueue: Move[],
   pickups: Pickup[],
 ): PlayerPlan | undefined {
   if (!playerTile) {
     return undefined;
   }
+
+  const playerQueue = predictPlayerQueue(board, playerTile, pickups);
 
   const tiles = [copyTile(playerTile)];
   const pickupArrivalSteps = new Map<string, number>();
@@ -845,6 +845,35 @@ function createPlayerPlan(
   };
 }
 
+// The rival cannot see the player's committed queue, so it assumes the player
+// heads for the pickup that looks best from the public board: highest value
+// per step, nearest first.
+function predictPlayerQueue(
+  board: BoardState,
+  playerTile: TilePosition,
+  pickups: Pickup[],
+): Move[] {
+  let bestPath: Move[] = [];
+  let bestRatio = 0;
+
+  for (const pickup of pickups) {
+    const path = findShortestPath(board, playerTile, pickup.tile, 0);
+
+    if (!path || path.length === 0) {
+      continue;
+    }
+
+    const ratio = pickup.value / path.length;
+
+    if (ratio > bestRatio) {
+      bestRatio = ratio;
+      bestPath = path;
+    }
+  }
+
+  return bestPath;
+}
+
 function createPlanningRandomSource(
   board: BoardState,
   startTile: TilePosition,
@@ -866,7 +895,7 @@ function createPlanningRandomSource(
     seed,
     `player:${context.playerTile ? tileKey(context.playerTile) : "none"}`,
   );
-  seed = hashString(seed, `queue:${(context.playerQueue ?? []).join(",")}`);
+  seed = hashString(seed, `seed:${context.seed ?? 0}`);
   seed = hashString(seed, `priority:${context.priorityOwner ?? "none"}`);
 
   return createRandomSource(seed);
