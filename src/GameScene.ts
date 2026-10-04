@@ -8,7 +8,7 @@ import {
   GAME_TITLE,
   GAME_WIDTH,
 } from "./game/constants";
-import { getTileCenter, sameTile } from "./game/board";
+import { getTileCenter as getTileCenterAt, sameTile } from "./game/board";
 import {
   applyStepScore,
   clearPlayerQueue,
@@ -25,6 +25,8 @@ import {
 } from "./game/match-flow";
 import { createMatchCompleteOverlayModel } from "./game/match-end-overlay";
 import { getGuideCoach } from "./game/guide-coach";
+import { computeLayout, isCompact } from "./game/layout";
+import type { CompactLayout, GameLayout, Rect } from "./game/layout";
 import { recordGuideOutcome } from "./game/onboarding-progress";
 import { createMovePreview } from "./game/preview";
 import { resolveNextStep } from "./game/round-resolution";
@@ -65,8 +67,9 @@ const SIDE_PANEL_WIDTH = 176;
 const LEFT_PANEL_X = BOARD_ORIGIN.x - SIDE_PANEL_GAP - SIDE_PANEL_WIDTH;
 const RIGHT_PANEL_X = BOARD_ORIGIN.x + BOARD_PIXEL_SIZE + SIDE_PANEL_GAP;
 const PREVIEW_LINE_WIDTH = Math.max(4, Math.round(CELL_SIZE * 0.08));
-const PREVIEW_MARKER_RADIUS = Math.round(CELL_SIZE * 0.11);
 const QUEUE_ROW_GAP = 22;
+const ZERO_ORIGIN = { x: 0, y: 0 } as const;
+const MIN_BOARD_TEXT_PX = 11;
 const ONBOARDING_STORAGE_KEY = "energy-duel:onboarding-seen";
 const ONBOARDING_FADE_MS = 280;
 const SHOW_RIVAL_MOOD_DEBUG =
@@ -164,6 +167,13 @@ export class GameScene extends Phaser.Scene {
   private sceneStartedAt = 0;
   private firstRevealLogged = false;
   private lastCollisionWinner: RobotId | null = null;
+  private layout: GameLayout = computeLayout(GAME_WIDTH, GAME_HEIGHT);
+  private boardLayer?: Phaser.GameObjects.Container;
+  private activeLayer?: Phaser.GameObjects.Container;
+  private compactPanel: "audio" | null = null;
+  private rulesPage = 0;
+  private lastLayoutKey = "";
+  private backdrop?: Phaser.GameObjects.Graphics;
 
   constructor() {
     super("GameScene");
@@ -175,7 +185,7 @@ export class GameScene extends Phaser.Scene {
     this.round = createRoundState(this.match.currentRound);
     this.rulesOverlayMode = this.hasSeenOnboarding() ? null : "welcome";
 
-    this.drawBackdrop();
+    this.refreshLayout();
     if (this.rulesOverlayVisible) {
       this.registerOnboardingInput();
     } else {
@@ -183,8 +193,55 @@ export class GameScene extends Phaser.Scene {
     }
     this.registerAudioStartInput();
     this.registerAudioSettingsInput();
-    this.events.once("shutdown", () => this.audio.destroy());
+    this.scale.on("resize", this.handleResize, this);
+    this.events.once("shutdown", () => {
+      this.scale.off("resize", this.handleResize, this);
+      this.audio.destroy();
+    });
     this.render();
+  }
+
+  private get compact(): CompactLayout | null {
+    return isCompact(this.layout) ? this.layout : null;
+  }
+
+  private refreshLayout(): void {
+    const { width, height } = this.scale;
+    this.layout = computeLayout(width, height, {
+      guided: this.match.mode === "guided",
+    });
+
+    const camera = this.cameras.main;
+    camera.setZoom(this.layout.zoom);
+    camera.centerOn(
+      this.compact ? width / 2 : GAME_WIDTH / 2,
+      this.compact ? height / 2 : GAME_HEIGHT / 2,
+    );
+    this.drawBackdrop();
+  }
+
+  private handleResize(): void {
+    if (this.match.status === "executing") {
+      // Layout is re-read on the next step render; keep the current step intact.
+      return;
+    }
+
+    this.render();
+  }
+
+  private tileCenter(tile: TilePosition): { x: number; y: number } {
+    return getTileCenterAt(tile, ZERO_ORIGIN);
+  }
+
+  /** Board-layer font size: keeps tiny board labels readable once the board is scaled down. */
+  private boardFontPx(px: number): number {
+    const compact = this.compact;
+
+    if (!compact) {
+      return px;
+    }
+
+    return Math.max(px, Math.ceil(MIN_BOARD_TEXT_PX / compact.board.scale));
   }
 
   private registerInput(): void {
@@ -223,7 +280,10 @@ export class GameScene extends Phaser.Scene {
     keyboard.on("keydown-N", () => this.replayMatch());
     keyboard.on("keydown-K", () => this.skipToStandardMatch());
     keyboard.on("keydown-H", () => this.toggleRulesOverlay());
-    keyboard.on("keydown-ESC", () => this.hideRulesOverlay());
+    keyboard.on("keydown-ESC", () => {
+      this.closeCompactPanel();
+      this.hideRulesOverlay();
+    });
 
     if (ENABLE_MATCH_END_DEBUG) {
       keyboard.on("keydown-M", () => this.debugJumpToMatchComplete());
@@ -275,6 +335,8 @@ export class GameScene extends Phaser.Scene {
     }
 
     this.stopVolumeSliderDrag();
+    this.compactPanel = null;
+    this.rulesPage = 0;
     this.rulesOverlayMode = mode;
     this.renderIfNotExecuting();
   }
@@ -657,8 +719,8 @@ export class GameScene extends Phaser.Scene {
       return;
     }
 
-    const playerEnd = getTileCenter(visual.playerEnd);
-    const rivalEnd = getTileCenter(visual.rivalEnd);
+    const playerEnd = this.tileCenter(visual.playerEnd);
+    const rivalEnd = this.tileCenter(visual.rivalEnd);
 
     this.showMovementTrails(visual);
     this.playMovementAudio(visual);
@@ -710,9 +772,9 @@ export class GameScene extends Phaser.Scene {
       return;
     }
 
-    const from = getTileCenter(fromTile);
-    const to = getTileCenter(toTile);
-    const g = this.track(this.add.graphics());
+    const from = this.tileCenter(fromTile);
+    const to = this.tileCenter(toTile);
+    const g = this.trackBoard(this.add.graphics());
     const glowColor =
       robot === "player" ? TRON_THEME.player : TRON_THEME.rivalAccent;
     const coreColor =
@@ -873,21 +935,47 @@ export class GameScene extends Phaser.Scene {
   }
 
   private render(): void {
+    this.syncLayout();
     this.clearRenderObjects();
     const preview =
       this.match.status === "queuing" ? createMovePreview(this.round) : undefined;
 
+    this.beginBoardLayer();
     this.drawBoard();
     this.drawPreviewPaths(preview);
     this.drawPickups();
     this.drawPreviewPickupClaims(preview);
     this.drawRobots();
+    this.activeLayer = undefined;
     this.drawExecutionStepBadge();
     this.drawHud();
 
     if (this.rulesOverlayVisible) {
       this.drawRulesOverlay();
     }
+  }
+
+  private syncLayout(): void {
+    const key = `${this.scale.width}x${this.scale.height}:${this.match.mode}`;
+
+    if (key === this.lastLayoutKey) {
+      return;
+    }
+
+    this.lastLayoutKey = key;
+    this.refreshLayout();
+  }
+
+  /** Everything on the board is drawn at 64px-cell design size inside one scalable layer. */
+  private beginBoardLayer(): void {
+    const compact = this.compact;
+    const origin = compact ? compact.board : BOARD_ORIGIN;
+    const layer = this.track(this.add.container(origin.x, origin.y));
+
+    layer.setScale(compact ? compact.board.scale : 1);
+    layer.setDepth(0);
+    this.boardLayer = layer;
+    this.activeLayer = layer;
   }
 
   private clearRenderObjects(): void {
@@ -901,31 +989,53 @@ export class GameScene extends Phaser.Scene {
 
   private track<T extends Phaser.GameObjects.GameObject>(object: T): T {
     this.renderObjects.push(object);
+    this.activeLayer?.add(object);
+    return object;
+  }
+
+  private trackBoard<T extends Phaser.GameObjects.GameObject>(object: T): T {
+    this.renderObjects.push(object);
+    this.boardLayer?.add(object);
     return object;
   }
 
   private drawBackdrop(): void {
     this.cameras.main.setBackgroundColor(TRON_THEME.backgroundCss);
+    this.backdrop?.destroy();
 
+    const zoom = this.layout.zoom;
+    const worldW = this.layout.width / zoom;
+    const worldH = this.layout.height / zoom;
+    const centerX = this.compact ? this.layout.width / 2 : GAME_WIDTH / 2;
+    const centerY = this.compact ? this.layout.height / 2 : GAME_HEIGHT / 2;
+    const left = Math.floor((centerX - worldW / 2) / 96) * 96;
+    const top = Math.floor((centerY - worldH / 2) / 96) * 96;
+    const right = centerX + worldW / 2;
+    const bottom = centerY + worldH / 2;
     const g = this.add.graphics();
+
+    this.backdrop = g;
+    g.setDepth(-10);
     g.fillStyle(TRON_THEME.background, 1);
-    g.fillRect(0, 0, GAME_WIDTH, GAME_HEIGHT);
+    g.fillRect(left, top, right - left, bottom - top);
     g.setBlendMode(Phaser.BlendModes.ADD);
 
-    for (let x = 0; x <= GAME_WIDTH; x += 48) {
+    for (let x = left; x <= right; x += 48) {
       g.lineStyle(1, TRON_THEME.backdropLine, x % 96 === 0 ? 0.1 : 0.05);
-      g.lineBetween(x, 0, x, GAME_HEIGHT);
+      g.lineBetween(x, top, x, bottom);
     }
 
-    for (let y = 0; y <= GAME_HEIGHT; y += 48) {
+    for (let y = top; y <= bottom; y += 48) {
       g.lineStyle(1, TRON_THEME.backdropLine, y % 96 === 0 ? 0.11 : 0.06);
-      g.lineBetween(0, y, GAME_WIDTH, y);
+      g.lineBetween(left, y, right, y);
     }
 
     g.lineStyle(1, TRON_THEME.rivalAccent, 0.04);
 
-    for (let x = -GAME_HEIGHT; x < GAME_WIDTH + GAME_HEIGHT; x += 96) {
-      g.lineBetween(x, GAME_HEIGHT, x + GAME_HEIGHT, 0);
+    const span = bottom - top;
+
+    for (let x = left - span; x < right + span; x += 96) {
+      g.lineBetween(x, bottom, x + span, top);
     }
   }
 
@@ -936,29 +1046,29 @@ export class GameScene extends Phaser.Scene {
     g.setBlendMode(Phaser.BlendModes.ADD);
     g.lineStyle(14, TRON_THEME.boardGlow, 0.05);
     g.strokeRect(
-      BOARD_ORIGIN.x - 18,
-      BOARD_ORIGIN.y - 18,
+      0 - 18,
+      0 - 18,
       BOARD_PIXEL_SIZE + 36,
       BOARD_PIXEL_SIZE + 36,
     );
     g.lineStyle(8, TRON_THEME.boardGlow, 0.1);
     g.strokeRect(
-      BOARD_ORIGIN.x - 10,
-      BOARD_ORIGIN.y - 10,
+      0 - 10,
+      0 - 10,
       BOARD_PIXEL_SIZE + 20,
       BOARD_PIXEL_SIZE + 20,
     );
     g.lineStyle(3, TRON_THEME.boardGlow, 0.52);
     g.strokeRect(
-      BOARD_ORIGIN.x - 4,
-      BOARD_ORIGIN.y - 4,
+      0 - 4,
+      0 - 4,
       BOARD_PIXEL_SIZE + 8,
       BOARD_PIXEL_SIZE + 8,
     );
 
     g.setBlendMode(Phaser.BlendModes.NORMAL);
     g.fillStyle(TRON_THEME.boardFill, 0.94);
-    g.fillRect(BOARD_ORIGIN.x, BOARD_ORIGIN.y, BOARD_PIXEL_SIZE, BOARD_PIXEL_SIZE);
+    g.fillRect(0, 0, BOARD_PIXEL_SIZE, BOARD_PIXEL_SIZE);
 
     for (let index = 0; index <= BOARD_SIZE; index += 1) {
       const offset = index * CELL_SIZE;
@@ -966,30 +1076,30 @@ export class GameScene extends Phaser.Scene {
 
       g.lineStyle(isEdge ? 9 : 5, TRON_THEME.grid, isEdge ? 0.18 : 0.1);
       g.lineBetween(
-        BOARD_ORIGIN.x + offset,
-        BOARD_ORIGIN.y,
-        BOARD_ORIGIN.x + offset,
-        BOARD_ORIGIN.y + BOARD_PIXEL_SIZE,
+        0 + offset,
+        0,
+        0 + offset,
+        0 + BOARD_PIXEL_SIZE,
       );
       g.lineBetween(
-        BOARD_ORIGIN.x,
-        BOARD_ORIGIN.y + offset,
-        BOARD_ORIGIN.x + BOARD_PIXEL_SIZE,
-        BOARD_ORIGIN.y + offset,
+        0,
+        0 + offset,
+        0 + BOARD_PIXEL_SIZE,
+        0 + offset,
       );
 
       g.lineStyle(isEdge ? 3 : 1, TRON_THEME.grid, isEdge ? 0.95 : 0.74);
       g.lineBetween(
-        BOARD_ORIGIN.x + offset,
-        BOARD_ORIGIN.y,
-        BOARD_ORIGIN.x + offset,
-        BOARD_ORIGIN.y + BOARD_PIXEL_SIZE,
+        0 + offset,
+        0,
+        0 + offset,
+        0 + BOARD_PIXEL_SIZE,
       );
       g.lineBetween(
-        BOARD_ORIGIN.x,
-        BOARD_ORIGIN.y + offset,
-        BOARD_ORIGIN.x + BOARD_PIXEL_SIZE,
-        BOARD_ORIGIN.y + offset,
+        0,
+        0 + offset,
+        0 + BOARD_PIXEL_SIZE,
+        0 + offset,
       );
     }
 
@@ -1001,8 +1111,8 @@ export class GameScene extends Phaser.Scene {
   }
 
   private drawBoardCornerBrackets(g: Phaser.GameObjects.Graphics): void {
-    const x = BOARD_ORIGIN.x - 11;
-    const y = BOARD_ORIGIN.y - 11;
+    const x = 0 - 11;
+    const y = 0 - 11;
     const size = BOARD_PIXEL_SIZE + 22;
     const bracket = 34;
 
@@ -1018,7 +1128,7 @@ export class GameScene extends Phaser.Scene {
   }
 
   private drawBlocker(tile: TilePosition): void {
-    const center = getTileCenter(tile);
+    const center = this.tileCenter(tile);
     const size = CELL_SIZE - 14;
     const g = this.track(this.add.graphics());
     const x = center.x - size / 2;
@@ -1053,7 +1163,7 @@ export class GameScene extends Phaser.Scene {
 
   private drawPickups(): void {
     for (const pickup of this.round.pickups) {
-      const center = getTileCenter(pickup.tile);
+      const center = this.tileCenter(pickup.tile);
       const style = getPickupStyle(pickup.value);
       const halo = this.add.graphics();
       const body = this.add.graphics();
@@ -1077,7 +1187,7 @@ export class GameScene extends Phaser.Scene {
           .text(0, isHighValue ? 27 : 22, String(pickup.value), {
             color: style.text,
             fontFamily: TRON_THEME.fontFamily,
-            fontSize: isHighValue ? "15px" : "12px",
+            fontSize: `${this.boardFontPx(isHighValue ? 15 : 12)}px`,
             fontStyle: "800",
           })
           .setOrigin(0.5),
@@ -1139,7 +1249,7 @@ export class GameScene extends Phaser.Scene {
     for (let step = 1; step < path.length; step += 1) {
       const point = this.previewPoint(path[step]);
       const alpha = this.previewStepAlpha(step, committedSteps);
-      const radius = PREVIEW_MARKER_RADIUS;
+      const radius = Math.round(this.boardFontPx(10) * 0.7);
 
       g.fillStyle(color, alpha * 0.15);
       g.fillCircle(point.x, point.y, radius + 7);
@@ -1164,11 +1274,12 @@ export class GameScene extends Phaser.Scene {
   }
 
   private drawPreviewPickupClaim(claim: PreviewPickupClaim): void {
-    const center = getTileCenter(claim.pickup.tile);
+    const center = this.tileCenter(claim.pickup.tile);
     const color = this.robotThemeColor("player");
     const alpha = 0.82;
     const radius = claim.pickup.value === 3 ? 27 : 24;
     const g = this.track(this.add.graphics());
+    const factor = this.boardFontPx(10) / 10;
     const badgeX = center.x - 22;
     const badgeY = center.y - 22;
 
@@ -1176,14 +1287,14 @@ export class GameScene extends Phaser.Scene {
     g.lineStyle(4, color, alpha);
     g.strokeCircle(center.x, center.y, radius);
     g.fillStyle(color, 0.92);
-    g.fillCircle(badgeX, badgeY, 9);
+    g.fillCircle(badgeX, badgeY, 9 * factor);
 
     const label = this.track(
       this.add
         .text(badgeX, badgeY, "Y", {
           color: "#061018",
           fontFamily: TRON_THEME.fontFamily,
-          fontSize: "10px",
+          fontSize: `${10 * factor}px`,
           fontStyle: "900",
         })
         .setOrigin(0.5),
@@ -1219,7 +1330,7 @@ export class GameScene extends Phaser.Scene {
     robot: RobotId,
     stunned: boolean,
   ): Phaser.GameObjects.Container {
-    const center = getTileCenter(tile);
+    const center = this.tileCenter(tile);
     const primary = this.robotThemeColor(robot);
     const accent = this.robotAccentColor(robot);
     const facing = this.robotFacing(robot);
@@ -1303,29 +1414,36 @@ export class GameScene extends Phaser.Scene {
     const label = this.robotName(robot).toUpperCase();
     const color = this.robotThemeColor(robot);
     const accent = this.robotAccentColor(robot);
-    const width = robot === "player" ? 46 : 62;
-    const height = 18;
-    const y = tile.row === 0 ? 38 : -38;
+    const fontPx = this.boardFontPx(10);
+    const factor = fontPx / 10;
+    const width = (robot === "player" ? 46 : 62) * factor;
+    const height = 18 * factor;
+    const y = (tile.row === 0 ? 1 : -1) * (29 + height / 2);
+    const cellCenter = tile.col * CELL_SIZE + CELL_SIZE / 2;
+    const dx = Math.max(
+      width / 2 - cellCenter,
+      Math.min(0, BOARD_PIXEL_SIZE - cellCenter - width / 2),
+    );
     const bg = this.add.graphics();
 
     bg.fillStyle(ROBOT_PANEL_DARK, 0.88);
-    bg.fillRoundedRect(-width / 2, y - height / 2, width, height, 5);
+    bg.fillRoundedRect(dx - width / 2, y - height / 2, width, height, 5);
     bg.lineStyle(4, color, 0.1);
     bg.strokeRoundedRect(
-      -width / 2 - 1,
+      dx - width / 2 - 1,
       y - height / 2 - 1,
       width + 2,
       height + 2,
       6,
     );
     bg.lineStyle(1, accent, 0.88);
-    bg.strokeRoundedRect(-width / 2, y - height / 2, width, height, 5);
+    bg.strokeRoundedRect(dx - width / 2, y - height / 2, width, height, 5);
 
     const text = this.add
-      .text(0, y, label, {
+      .text(dx, y, label, {
         color: TRON_THEME.textPrimary,
         fontFamily: TRON_THEME.fontFamily,
-        fontSize: "10px",
+        fontSize: `${fontPx}px`,
         fontStyle: "900",
       })
       .setOrigin(0.5);
@@ -1577,9 +1695,9 @@ export class GameScene extends Phaser.Scene {
   }
 
   private showPickupCollectionFlash(pickup: Pickup): void {
-    const center = getTileCenter(pickup.tile);
+    const center = this.tileCenter(pickup.tile);
     const style = getPickupStyle(pickup.value);
-    const g = this.track(this.add.graphics());
+    const g = this.trackBoard(this.add.graphics());
 
     g.setDepth(3.4);
     g.setBlendMode(Phaser.BlendModes.ADD);
@@ -1601,10 +1719,10 @@ export class GameScene extends Phaser.Scene {
   }
 
   private showScorePop(robot: RobotId, delta: number, tile: TilePosition): void {
-    const center = getTileCenter(tile);
+    const center = this.tileCenter(tile);
     const color = this.robotColor(robot);
     const text = this.applyTextGlow(
-      this.track(
+      this.trackBoard(
         this.add
           .text(center.x, center.y - 34, `+${delta}`, {
             color,
@@ -1709,9 +1827,9 @@ export class GameScene extends Phaser.Scene {
     color: number,
     label: string,
   ): void {
-    const g = this.track(this.add.graphics());
+    const g = this.trackBoard(this.add.graphics());
     const text = this.applyTextGlow(
-      this.track(
+      this.trackBoard(
         this.add
           .text(x, y - 36, label, {
             color: this.cssColor(color),
@@ -1748,6 +1866,13 @@ export class GameScene extends Phaser.Scene {
   }
 
   private drawHud(): void {
+    const compact = this.compact;
+
+    if (compact) {
+      this.drawCompactHud(compact);
+      return;
+    }
+
     this.drawTerminalFrames();
     this.drawGameTitle();
     this.drawMatchReadout();
@@ -1825,6 +1950,13 @@ export class GameScene extends Phaser.Scene {
   }
 
   private drawRulesOverlay(): void {
+    const compact = this.compact;
+
+    if (compact) {
+      this.drawCompactRulesOverlay(compact);
+      return;
+    }
+
     const panelWidth = 640;
     const panelHeight = 560;
     const panelX = (GAME_WIDTH - panelWidth) / 2;
@@ -2344,7 +2476,7 @@ export class GameScene extends Phaser.Scene {
   }
 
   private drawExecutionStepBadge(): void {
-    if (this.match.status !== "executing") {
+    if (this.compact || this.match.status !== "executing") {
       return;
     }
 
@@ -2501,23 +2633,53 @@ export class GameScene extends Phaser.Scene {
   private drawMatchCompleteOverlay(): void {
     const panelWidth = 430;
     const panelHeight = 342;
-    const panelX = BOARD_ORIGIN.x + (BOARD_PIXEL_SIZE - panelWidth) / 2;
-    const panelY = BOARD_ORIGIN.y + (BOARD_PIXEL_SIZE - panelHeight) / 2;
+    const compact = this.compact;
+    const overlayScale = compact
+      ? Math.min(1, (compact.width - 24) / panelWidth, (compact.height - 16) / panelHeight)
+      : 1;
+    const panelX = compact
+      ? 0
+      : BOARD_ORIGIN.x + (BOARD_PIXEL_SIZE - panelWidth) / 2;
+    const panelY = compact
+      ? 0
+      : BOARD_ORIGIN.y + (BOARD_PIXEL_SIZE - panelHeight) / 2;
     const panelCenterX = panelX + panelWidth / 2;
     const depth = 8;
     const overlay = createMatchCompleteOverlayModel(this.match);
     const resultStyle = this.finalResultStyle(overlay.resultLabel);
     const shade = this.track(this.add.graphics());
-    const panel = this.track(this.add.graphics());
 
     shade.setDepth(depth);
     shade.fillStyle(0x020712, 0.76);
-    shade.fillRect(
-      BOARD_ORIGIN.x - 8,
-      BOARD_ORIGIN.y - 8,
-      BOARD_PIXEL_SIZE + 16,
-      BOARD_PIXEL_SIZE + 16,
-    );
+
+    if (compact) {
+      shade.fillRect(0, 0, compact.width, compact.height);
+      this.track(
+        this.add.zone(0, 0, compact.width, compact.height).setOrigin(0),
+      )
+        .setDepth(depth + 0.05)
+        .setInteractive();
+
+      const layer = this.track(
+        this.add.container(
+          (compact.width - panelWidth * overlayScale) / 2,
+          (compact.height - panelHeight * overlayScale) / 2,
+        ),
+      );
+
+      layer.setScale(overlayScale);
+      layer.setDepth(depth + 0.1);
+      this.activeLayer = layer;
+    } else {
+      shade.fillRect(
+        BOARD_ORIGIN.x - 8,
+        BOARD_ORIGIN.y - 8,
+        BOARD_PIXEL_SIZE + 16,
+        BOARD_PIXEL_SIZE + 16,
+      );
+    }
+
+    const panel = this.track(this.add.graphics());
 
     panel.setDepth(depth + 0.1);
     panel.lineStyle(10, resultStyle.accent, 0.1);
@@ -2581,6 +2743,7 @@ export class GameScene extends Phaser.Scene {
       () => this.replayMatch(),
       depth + 1,
     );
+    this.activeLayer = undefined;
   }
 
   private finalResultStyle(label: FinalResultLabel): {
@@ -2915,6 +3078,7 @@ export class GameScene extends Phaser.Scene {
     kind: VolumeSliderKind,
     color: number,
     depth: number,
+    hitHeight = 28,
   ): void {
     const percent = Math.round(value * 100);
     const trackX = x + 2;
@@ -2952,7 +3116,7 @@ export class GameScene extends Phaser.Scene {
     });
 
     const hitArea = this.track(
-      this.add.zone(trackX, trackY, trackWidth, 28).setOrigin(0, 0.5),
+      this.add.zone(trackX, trackY, trackWidth, hitHeight).setOrigin(0, 0.5),
     );
     hitArea.setDepth(depth + 0.2);
     hitArea.setInteractive({ useHandCursor: true });
@@ -2992,7 +3156,8 @@ export class GameScene extends Phaser.Scene {
       return;
     }
 
-    const value = Math.min(1, Math.max(0, (pointer.x - slider.x) / slider.width));
+    const worldX = this.cameras.main.getWorldPoint(pointer.x, pointer.y).x;
+    const value = Math.min(1, Math.max(0, (worldX - slider.x) / slider.width));
     const currentSettings = this.audio.getSettings();
     const currentValue =
       slider.kind === "music"
@@ -3038,9 +3203,10 @@ export class GameScene extends Phaser.Scene {
     onClick: () => void,
     depth = 0,
     fontSize = "13px",
+    emphasis = false,
   ): void {
     const g = this.track(this.add.graphics());
-    const fill = enabled ? 0x08263a : 0x07101b;
+    const fill = enabled ? (emphasis ? 0x0b4a63 : 0x08263a) : 0x07101b;
     const stroke = enabled ? TRON_THEME.grid : TRON_THEME.gridDim;
     const alpha = enabled ? 0.9 : 0.56;
 
@@ -3065,7 +3231,8 @@ export class GameScene extends Phaser.Scene {
             color: enabled ? TRON_THEME.textPrimary : TRON_THEME.textGhost,
             fontFamily: TRON_THEME.fontFamily,
             fontSize,
-            fontStyle: "700",
+            fontStyle: emphasis ? "900" : "700",
+            align: "center",
           })
           .setOrigin(0.5),
       ),
@@ -3080,6 +3247,7 @@ export class GameScene extends Phaser.Scene {
 
     const hitArea = this.track(this.add.zone(x, y, width, height).setOrigin(0));
     hitArea.setDepth(depth + 0.2);
+    hitArea.setName(label.replace("\n", " "));
     hitArea.setInteractive({ useHandCursor: true });
     hitArea.on("pointerdown", onClick);
   }
@@ -3137,7 +3305,7 @@ export class GameScene extends Phaser.Scene {
   }
 
   private previewPoint(tile: TilePosition): Phaser.Math.Vector2 {
-    const center = getTileCenter(tile);
+    const center = this.tileCenter(tile);
 
     return new Phaser.Math.Vector2(center.x, center.y);
   }
@@ -3152,7 +3320,7 @@ export class GameScene extends Phaser.Scene {
         .text(point.x, point.y, String(step), {
           color: this.cssColor(TRON_THEME.player),
           fontFamily: TRON_THEME.fontFamily,
-          fontSize: "10px",
+          fontSize: `${this.boardFontPx(10)}px`,
           fontStyle: "900",
         })
         .setOrigin(0.5),
@@ -3162,4 +3330,665 @@ export class GameScene extends Phaser.Scene {
     text.setDepth(1.5);
   }
 
+  // ---------------------------------------------------------------------------
+  // Compact (phone) presentation
+  // ---------------------------------------------------------------------------
+
+  private drawCompactHud(c: CompactLayout): void {
+    const locked = this.rulesOverlayVisible || this.compactPanel !== null;
+    const landscape = c.kind === "landscape";
+
+    this.drawCompactStatus(c, landscape);
+    this.drawCompactMenu(c, locked);
+
+    if (this.match.status === "match-complete") {
+      this.drawMatchCompleteOverlay();
+    } else {
+      this.drawCompactQueue(c);
+      this.drawCompactControls(c, locked);
+      this.drawCompactCoach(c, locked);
+    }
+
+    this.drawCompactAudioPanel(c);
+  }
+
+  private drawCompactCard(rect: Rect, accent: number, alpha = 0.66): void {
+    const g = this.track(this.add.graphics());
+
+    g.setDepth(0.1);
+    g.fillStyle(TRON_THEME.panelFill, alpha);
+    g.fillRoundedRect(rect.x, rect.y, rect.w, rect.h, 6);
+    g.lineStyle(1, accent, 0.5);
+    g.strokeRoundedRect(rect.x, rect.y, rect.w, rect.h, 6);
+  }
+
+  private compactText(
+    x: number,
+    y: number,
+    text: string | string[],
+    color: string,
+    fontPx: number,
+    options: {
+      weight?: string;
+      originX?: number;
+      originY?: number;
+      wrap?: number;
+      depth?: number;
+    } = {},
+  ): Phaser.GameObjects.Text {
+    const textObject = this.track(
+      this.add
+        .text(x, y, text, {
+          align: (options.originX ?? 0) === 0.5 ? "center" : "left",
+          color,
+          fontFamily: TRON_THEME.fontFamily,
+          fontSize: `${fontPx}px`,
+          fontStyle: options.weight ?? "800",
+          lineSpacing: 2,
+          wordWrap: options.wrap
+            ? { width: options.wrap, useAdvancedWrap: true }
+            : undefined,
+        })
+        .setOrigin(options.originX ?? 0, options.originY ?? 0),
+    );
+
+    textObject.setDepth(options.depth ?? 0.3);
+    this.applyTextGlow(textObject, color, 6);
+    return textObject;
+  }
+
+  private drawCompactStatus(c: CompactLayout, landscape: boolean): void {
+    const step = this.activeStepVisual?.step;
+    const playerDelta = step?.playerScoreDelta ?? 0;
+    const rivalDelta = step?.rivalScoreDelta ?? 0;
+    const round = `ROUND ${this.match.currentRound} / ${this.match.totalRounds}`;
+    const owner = this.round.priorityOwner;
+
+    if (landscape) {
+      this.compactText(c.round.x, c.round.y + 2, round, TRON_THEME.textPrimary, 13);
+    } else {
+      this.drawCompactCard(c.round, TRON_THEME.grid, 0.3);
+      this.compactText(
+        c.round.x + 10,
+        c.round.y + c.round.h / 2,
+        round,
+        TRON_THEME.textPrimary,
+        16,
+        { originY: 0.5 },
+      );
+    }
+
+    this.drawCompactCard(
+      c.priority,
+      owner === "player" ? TRON_THEME.player : TRON_THEME.rival,
+    );
+    this.compactText(
+      c.priority.x + c.priority.w / 2,
+      c.priority.y + 5,
+      "PRIORITY",
+      TRON_THEME.textMuted,
+      11,
+      { originX: 0.5, weight: "700" },
+    );
+    this.compactText(
+      c.priority.x + c.priority.w / 2,
+      c.priority.y + 19,
+      this.robotName(owner).toUpperCase(),
+      this.robotColor(owner),
+      landscape ? 16 : 17,
+      { originX: 0.5, weight: "900" },
+    );
+
+    const scoreRows: Array<[Rect, RobotId, number, number]> = [
+      [c.scores.you, "player", this.match.playerScore, playerDelta],
+      [c.scores.enemy, "rival", this.match.rivalScore, rivalDelta],
+    ];
+
+    for (const [rect, robot, score, delta] of scoreRows) {
+      const color = this.robotColor(robot);
+      const value = `${score}${delta > 0 ? ` +${delta}` : ""}`;
+
+      if (landscape) {
+        this.compactText(
+          rect.x + 2,
+          rect.y + rect.h / 2,
+          `${this.robotName(robot).toUpperCase()}: ${value}`,
+          color,
+          14,
+          { originY: 0.5, weight: delta > 0 ? "900" : "700" },
+        );
+        continue;
+      }
+
+      this.drawCompactCard(
+        rect,
+        robot === "player" ? TRON_THEME.player : TRON_THEME.rival,
+      );
+      this.compactText(
+        rect.x + 10,
+        rect.y + 5,
+        this.robotName(robot).toUpperCase(),
+        color,
+        11,
+        { weight: "700" },
+      );
+      this.compactText(rect.x + 10, rect.y + 19, value, color, 17, {
+        weight: "900",
+      });
+    }
+  }
+
+  private drawCompactMenu(c: CompactLayout, locked: boolean): void {
+    const canOpen = !locked && this.match.status !== "executing";
+    const muted = this.audio.getSettings().muted;
+    const { rules, sound } = c.menu;
+
+    this.drawButton(
+      rules.x,
+      rules.y,
+      rules.w,
+      rules.h,
+      "RULES",
+      canOpen,
+      () => this.showRulesOverlay("rules"),
+      0.2,
+      "13px",
+    );
+    this.drawButton(
+      sound.x,
+      sound.y,
+      sound.w,
+      sound.h,
+      muted ? "MUTED" : "AUDIO",
+      !locked,
+      () => this.openCompactAudioPanel(),
+      0.2,
+      "13px",
+    );
+  }
+
+  private openCompactAudioPanel(): void {
+    this.audio.startMusic();
+    this.stopVolumeSliderDrag();
+    this.compactPanel = "audio";
+    this.renderIfNotExecuting();
+  }
+
+  private closeCompactPanel(): void {
+    if (this.compactPanel === null) {
+      return;
+    }
+
+    this.stopVolumeSliderDrag();
+    this.compactPanel = null;
+    this.renderIfNotExecuting();
+  }
+
+  private drawCompactQueue(c: CompactLayout): void {
+    const area = c.queue.area;
+    const executing = this.match.status === "executing";
+    const label = executing
+      ? `EXECUTING STEP ${this.round.currentExecutionStep} / ${this.round.maxSteps}`
+      : `YOUR QUEUE ${this.round.playerQueue.length}/${this.round.maxSteps}`;
+
+    this.compactText(
+      area.x + 2,
+      area.y,
+      label,
+      executing ? TRON_THEME.textAmber : TRON_THEME.textPrimary,
+      12,
+      { weight: "900" },
+    );
+
+    const count = this.round.maxSteps;
+    const gap = 4;
+    const top = area.y + 18;
+    const height = area.h - 18;
+    const columns = c.queue.style === "row" ? count : 4;
+    const rows = Math.ceil(count / columns);
+    const chipW = (area.w - gap * (columns - 1)) / columns;
+    const chipH = (height - gap * (rows - 1)) / rows;
+    const next = this.round.playerQueue.length;
+
+    for (let index = 0; index < count; index += 1) {
+      const rect = {
+        x: area.x + (index % columns) * (chipW + gap),
+        y: top + Math.floor(index / columns) * (chipH + gap),
+        w: chipW,
+        h: chipH,
+      };
+
+      this.drawCompactQueueChip(
+        rect,
+        index + 1,
+        this.round.playerQueue[index],
+        index === next && !executing,
+      );
+    }
+  }
+
+  private drawCompactQueueChip(
+    rect: Rect,
+    step: number,
+    move: Move | undefined,
+    isNext: boolean,
+  ): void {
+    const queued = move !== undefined;
+    const color = queued ? TRON_THEME.player : TRON_THEME.gridDim;
+    const g = this.track(this.add.graphics());
+
+    g.setDepth(0.1);
+    g.fillStyle(TRON_THEME.panelFill, queued ? 0.9 : 0.4);
+    g.fillRoundedRect(rect.x, rect.y, rect.w, rect.h, 5);
+    g.lineStyle(
+      isNext ? 2 : 1,
+      isNext ? 0xffd166 : color,
+      queued || isNext ? 0.9 : 0.4,
+    );
+    g.strokeRoundedRect(rect.x, rect.y, rect.w, rect.h, 5);
+
+    const glyph = move === undefined ? "" : this.moveGlyph(move);
+    const inline = rect.h < 40;
+    const numberColor = queued ? TRON_THEME.textMuted : TRON_THEME.textGhost;
+
+    if (inline) {
+      this.compactText(rect.x + 5, rect.y + rect.h / 2, String(step), numberColor, 11, {
+        originY: 0.5,
+        weight: "700",
+      });
+      this.compactText(
+        rect.x + rect.w - 5,
+        rect.y + rect.h / 2,
+        glyph,
+        TRON_THEME.textPrimary,
+        move === "wait" ? 11 : 17,
+        { originX: 1, originY: 0.5, weight: "900" },
+      );
+      return;
+    }
+
+    this.compactText(rect.x + rect.w / 2, rect.y + 3, String(step), numberColor, 11, {
+      originX: 0.5,
+      weight: "700",
+    });
+    this.compactText(
+      rect.x + rect.w / 2,
+      rect.y + rect.h - 5,
+      glyph,
+      TRON_THEME.textPrimary,
+      move === "wait" ? 11 : 20,
+      { originX: 0.5, originY: 1, weight: "900" },
+    );
+  }
+
+  private moveGlyph(move: Move): string {
+    switch (move) {
+      case "up":
+        return "↑";
+      case "down":
+        return "↓";
+      case "left":
+        return "←";
+      case "right":
+        return "→";
+      case "wait":
+        return "WAIT";
+    }
+  }
+
+  private drawCompactControls(c: CompactLayout, locked: boolean): void {
+    const canEdit = !locked && this.match.status === "queuing";
+    const canExecute = canEdit && isPlayerQueueReady(this.round);
+    const fontPx = c.controls.moves.up.w < 70 ? "12px" : c.controls.moves.up.h >= 52 ? "16px" : "14px";
+    const labels: Record<Move, string> = {
+      up: "UP",
+      down: "DOWN",
+      left: "LEFT",
+      right: "RIGHT",
+      wait: "WAIT",
+    };
+
+    for (const move of ["up", "left", "wait", "right", "down"] as const) {
+      const r = c.controls.moves[move];
+
+      this.drawButton(
+        r.x,
+        r.y,
+        r.w,
+        r.h,
+        labels[move],
+        canEdit,
+        () => this.addMove(move),
+        0.2,
+        fontPx,
+      );
+    }
+
+    const { undo, clear, execute } = c.controls;
+
+    this.drawButton(
+      undo.x,
+      undo.y,
+      undo.w,
+      undo.h,
+      "UNDO",
+      canEdit,
+      () => this.undoMove(),
+      0.2,
+      "13px",
+    );
+    this.drawButton(
+      clear.x,
+      clear.y,
+      clear.w,
+      clear.h,
+      "CLEAR",
+      canEdit,
+      () => this.clearQueue(),
+      0.2,
+      "13px",
+    );
+    this.drawButton(
+      execute.x,
+      execute.y,
+      execute.w,
+      execute.h,
+      "EXECUTE",
+      canExecute,
+      () => this.startExecution(),
+      0.2,
+      "17px",
+      true,
+    );
+  }
+
+  private drawCompactCoach(c: CompactLayout, locked: boolean): void {
+    if (!c.coach || !c.skip) {
+      return;
+    }
+
+    const skip = c.skip;
+    const canSkip = !locked && this.match.status !== "executing";
+    const landscape = c.kind === "landscape";
+
+    this.drawButton(
+      skip.x,
+      skip.y,
+      skip.w,
+      skip.h,
+      landscape ? "SKIP GUIDE" : "SKIP\nGUIDE",
+      canSkip,
+      () => this.skipToStandardMatch(),
+      0.2,
+      "11px",
+    );
+
+    const coach = getGuideCoach({
+      mode: this.match.mode,
+      round: this.match.currentRound,
+      status: this.match.status,
+      queueLength: this.round.playerQueue.length,
+      maxSteps: this.round.maxSteps,
+      priorityOwner: this.round.priorityOwner,
+      lastCollisionWinner: this.lastCollisionWinner,
+      touch: true,
+    });
+
+    if (!coach || c.coach.h < 24) {
+      return;
+    }
+
+    const rect = c.coach;
+
+    this.drawCompactCard(rect, TRON_THEME.rivalAccent, 0.9);
+
+    const heading = this.compactText(
+      rect.x + 8,
+      rect.y + 5,
+      landscape ? coach.title : `GUIDE · ${coach.title}`,
+      TRON_THEME.textAmber,
+      11,
+      { weight: "900", wrap: rect.w - 16 },
+    );
+    const bodyTop = rect.y + 5 + heading.height + 3;
+
+    const body = this.compactText(
+      rect.x + 8,
+      bodyTop,
+      coach.text,
+      TRON_THEME.textPrimary,
+      12,
+      { weight: "700", wrap: rect.w - 16 },
+    );
+    let size = 12;
+
+    while (body.height > rect.y + rect.h - bodyTop - 4 && size > 10) {
+      size -= 1;
+      body.setFontSize(size);
+    }
+  }
+
+  private drawCompactAudioPanel(c: CompactLayout): void {
+    if (this.compactPanel !== "audio") {
+      return;
+    }
+
+    const settings = this.audio.getSettings();
+    const depth = 12;
+    const width = Math.min(c.width - 24, 360);
+    const height = 288;
+    const x = (c.width - width) / 2;
+    const y = Math.max(8, (c.height - height) / 2);
+    const inner = width - 32;
+    const shade = this.track(this.add.graphics());
+    const panel = this.track(this.add.graphics());
+    const blocker = this.track(
+      this.add.zone(0, 0, c.width, c.height).setOrigin(0),
+    );
+
+    shade.setDepth(depth);
+    shade.fillStyle(0x01040a, 0.78);
+    shade.fillRect(0, 0, c.width, c.height);
+    blocker.setDepth(depth + 0.05);
+    blocker.setInteractive();
+
+    panel.setDepth(depth + 0.1);
+    panel.fillStyle(0x03111d, 0.98);
+    panel.fillRoundedRect(x, y, width, height, 8);
+    panel.lineStyle(3, TRON_THEME.player, 0.8);
+    panel.strokeRoundedRect(x, y, width, height, 8);
+
+    this.compactText(x + 16, y + 20, "AUDIO", TRON_THEME.textPrimary, 16, {
+      depth: depth + 0.2,
+      weight: "900",
+    });
+    this.drawButton(
+      x + width - 16 - 96,
+      y + 8,
+      96,
+      44,
+      settings.muted ? "UNMUTE" : "MUTE",
+      true,
+      () => this.toggleMute(),
+      depth + 0.2,
+      "13px",
+    );
+    this.drawVolumeSlider(
+      x + 16,
+      y + 62,
+      inner,
+      "MUSIC VOLUME",
+      settings.musicVolume,
+      "music",
+      TRON_THEME.grid,
+      depth + 0.2,
+      44,
+    );
+    this.drawVolumeSlider(
+      x + 16,
+      y + 132,
+      inner,
+      "SFX VOLUME",
+      settings.sfxVolume,
+      "sfx",
+      TRON_THEME.rivalAccent,
+      depth + 0.2,
+      44,
+    );
+    this.drawButton(
+      x + 16,
+      y + height - 64,
+      inner,
+      48,
+      "CLOSE",
+      true,
+      () => this.closeCompactPanel(),
+      depth + 0.2,
+      "15px",
+    );
+  }
+
+  private drawCompactRulesOverlay(c: CompactLayout): void {
+    const depth = 20;
+    const isWelcome = this.rulesOverlayMode === "welcome";
+    const pad = 8;
+    const landscape = c.kind === "landscape";
+    const width = Math.min(c.width - pad * 2, 560);
+    const height = landscape
+      ? c.height - pad * 2
+      : Math.min(c.height - pad * 2, isWelcome ? 400 : 380);
+    const x = (c.width - width) / 2;
+    const y = (c.height - height) / 2;
+    const inner = width - 32;
+    const shade = this.track(this.add.graphics());
+    const panel = this.track(this.add.graphics());
+    const blocker = this.track(
+      this.add.zone(0, 0, c.width, c.height).setOrigin(0),
+    );
+
+    shade.setDepth(depth);
+    shade.fillStyle(0x01040a, 0.86);
+    shade.fillRect(0, 0, c.width, c.height);
+    blocker.setDepth(depth + 0.05);
+    blocker.setInteractive();
+
+    panel.setDepth(depth + 0.1);
+    panel.fillStyle(0x03111d, 0.98);
+    panel.fillRoundedRect(x, y, width, height, 8);
+    panel.lineStyle(3, TRON_THEME.player, 0.8);
+    panel.strokeRoundedRect(x, y, width, height, 8);
+
+    const priorityOwner = this.robotName(this.round.priorityOwner).toUpperCase();
+    const buttonH = 48;
+    const footerY = y + height - buttonH - 12;
+
+    if (isWelcome) {
+      this.compactText(
+        x + width / 2,
+        y + 16,
+        GAME_TITLE.toUpperCase(),
+        TRON_THEME.textPrimary,
+        landscape ? 24 : 30,
+        { originX: 0.5, weight: "900", depth: depth + 0.2 },
+      );
+      this.compactText(
+        x + width / 2,
+        y + (landscape ? 48 : 58),
+        "WELCOME TO THE GRID",
+        TRON_THEME.textAmber,
+        12,
+        { originX: 0.5, weight: "900", depth: depth + 0.2 },
+      );
+      this.compactText(
+        x + 16,
+        y + (landscape ? 70 : 90),
+        [
+          "- Queue moves with the on-screen buttons, then tap EXECUTE.",
+          "- Small nodes score 1, large nodes score 3.",
+          "- Clashes go to the priority owner; the loser is stunned.",
+          "- You are cyan, the enemy is orange.",
+        ].join("\n"),
+        TRON_THEME.textPrimary,
+        landscape ? 14 : 14,
+        { weight: "700", wrap: inner, depth: depth + 0.2 },
+      );
+
+      const half = (inner - 8) / 2;
+
+      if (landscape) {
+        this.drawButton(x + 16, footerY, half, buttonH, "START GUIDED DUEL", true, () => this.beginFromWelcome("guided"), depth + 0.3, "13px");
+        this.drawButton(x + 24 + half, footerY, half, buttonH, "SKIP TO STANDARD", true, () => this.beginFromWelcome("standard"), depth + 0.3, "13px");
+      } else {
+        this.drawButton(x + 16, footerY - buttonH - 8, inner, buttonH, "START GUIDED DUEL", true, () => this.beginFromWelcome("guided"), depth + 0.3, "15px");
+        this.drawButton(x + 16, footerY, inner, buttonH, "SKIP TO STANDARD MATCH", true, () => this.beginFromWelcome("standard"), depth + 0.3, "13px");
+      }
+
+      return;
+    }
+
+    const pages: Array<{ title: string; accent: number; lines: string[] }> = [
+      {
+        title: "ROUND FLOW",
+        accent: TRON_THEME.player,
+        lines: [
+          "You are cyan; enemy is orange.",
+          `Queue ${this.round.maxSteps} moves this round.`,
+          "Both robots reveal together.",
+          "Small nodes are worth 1, large nodes 3.",
+          `Highest score after ${this.match.totalRounds} rounds wins.`,
+        ],
+      },
+      {
+        title: "CONTROLS",
+        accent: TRON_THEME.grid,
+        lines: [
+          "Tap UP, DOWN, LEFT, RIGHT or WAIT to queue a move.",
+          "UNDO removes the last move; CLEAR empties the queue.",
+          "EXECUTE runs both plans together.",
+          "Keyboard: arrows or WASD, Space, Backspace, Enter, H.",
+        ],
+      },
+      {
+        title: "COLLISIONS",
+        accent: TRON_THEME.rivalAccent,
+        lines: [
+          "Same tile or crossing paths causes a clash.",
+          `This round: ${priorityOwner} wins clashes and takes the tile/node.`,
+          "Collision priority swaps each round.",
+          "Loser is stunned: only their next move becomes WAIT.",
+        ],
+      },
+    ];
+    const page = Math.min(this.rulesPage, pages.length - 1);
+    const current = pages[page];
+
+    this.compactText(
+      x + 16,
+      y + 14,
+      `${current.title}  ${page + 1}/${pages.length}`,
+      this.cssColor(current.accent),
+      16,
+      { weight: "900", depth: depth + 0.2 },
+    );
+    this.compactText(
+      x + 16,
+      y + 46,
+      current.lines.map((line) => `- ${line}`).join("\n"),
+      TRON_THEME.textPrimary,
+      landscape ? 15 : 15,
+      { weight: "700", wrap: inner, depth: depth + 0.2 },
+    );
+
+    const third = (inner - 16) / 3;
+    const last = page === pages.length - 1;
+
+    this.drawButton(x + 16, footerY, third, buttonH, "BACK", page > 0, () => this.turnRulesPage(-1), depth + 0.3, "14px");
+    this.drawButton(x + 24 + third, footerY, third, buttonH, last ? "DONE" : "NEXT", true, () => (last ? this.hideRulesOverlay() : this.turnRulesPage(1)), depth + 0.3, "14px");
+    this.drawButton(x + 32 + third * 2, footerY, third, buttonH, "CLOSE", true, () => this.hideRulesOverlay(), depth + 0.3, "14px");
+  }
+
+  private turnRulesPage(delta: number): void {
+    this.rulesPage = Math.max(0, this.rulesPage + delta);
+    this.render();
+  }
 }

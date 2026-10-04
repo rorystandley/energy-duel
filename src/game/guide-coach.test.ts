@@ -53,4 +53,21 @@ describe("guided coach", () => {
   it("is quiet during execution without a clash", () => {
     expect(getGuideCoach(input({ status: "executing" }))).toBeNull();
   });
+
+  it("names touch buttons instead of keys on touch layouts", () => {
+    const texts = [
+      input({ touch: true, queueLength: 4 }),
+      input({ touch: true, queueLength: 1 }),
+      input({ touch: true, round: 2, maxSteps: 8 }),
+      input({ touch: true }),
+      input({ touch: true, status: "executing", lastCollisionWinner: "player" }),
+    ].map((value) => getGuideCoach(value)?.text ?? "");
+
+    for (const text of texts) {
+      expect(text).not.toMatch(/Enter|Backspace|Press /);
+      expect(text.length).toBeLessThanOrEqual(80);
+    }
+
+    expect(texts[0]).toMatch(/EXECUTE/);
+  });
 });

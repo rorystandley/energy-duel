@@ -109,10 +109,13 @@ export function moveTile(tile: TilePosition, move: Move): TilePosition {
   }
 }
 
-export function getTileCenter(tile: TilePosition): PixelPosition {
+export function getTileCenter(
+  tile: TilePosition,
+  origin: PixelPosition = BOARD_ORIGIN,
+): PixelPosition {
   return {
-    x: BOARD_ORIGIN.x + tile.col * CELL_SIZE + CELL_SIZE / 2,
-    y: BOARD_ORIGIN.y + tile.row * CELL_SIZE + CELL_SIZE / 2,
+    x: origin.x + tile.col * CELL_SIZE + CELL_SIZE / 2,
+    y: origin.y + tile.row * CELL_SIZE + CELL_SIZE / 2,
   };
 }
 
