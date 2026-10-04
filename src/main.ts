@@ -1,13 +1,8 @@
 import * as Phaser from "phaser";
 
 import { GameScene } from "./GameScene";
+import { wavedash } from "./platform/wavedash";
 import "./style.css";
-
-// Signal to Wavedash that the game is ready, dismissing the platform loading screen.
-// WavedashJS is injected automatically when running on Wavedash — safe to skip elsewhere.
-if (typeof WavedashJS !== "undefined") {
-  WavedashJS.init();
-}
 
 const config: Phaser.Types.Core.GameConfig = {
   type: Phaser.AUTO,
@@ -24,6 +19,11 @@ const config: Phaser.Types.Core.GameConfig = {
 };
 
 const game = new Phaser.Game(config);
+
+// Dismisses the Wavedash loading screen once Phaser is up; a no-op for guests.
+game.events.once(Phaser.Core.Events.READY, () => {
+  void wavedash.initialize();
+});
 
 if (import.meta.env.DEV) {
   // Lets scripted browsers find on-screen controls to tap during layout checks.
