@@ -16,6 +16,11 @@ function fakeSdk(overrides: Partial<WavedashSdkLike> = {}): WavedashSdkLike & {
     storeStats: () => true,
     addEventListener: () => {},
     removeEventListener: () => {},
+    getLeaderboard: async () => ({ success: true, data: { id: "board-1" } }),
+    uploadLeaderboardScore: async () => ({
+      success: true,
+      data: { score: 4, globalRank: 2, submittedScore: 4, submittedRank: 2 },
+    }),
     ...overrides,
   } as WavedashSdkLike & { init: ReturnType<typeof vi.fn> };
 }
@@ -256,5 +261,109 @@ describe("wavedash adapter progress", () => {
     ]);
     expect(events.filter((e) => e === "store")).toHaveLength(2);
     expect(events.indexOf("set:A=6")).toBeGreaterThan(events.indexOf("store"));
+  });
+});
+
+describe("wavedash leaderboard submission", () => {
+  const request = {
+    name: "daily-v1-2026-10-04",
+    score: 4,
+    metadata: { date: "2026-10-04", rulesVersion: 1, playerScore: 12, rivalScore: 8 },
+  };
+
+  it("resolves the board name to an id, then submits with keepBest and metadata", async () => {
+    const getLeaderboard = vi.fn(async () => ({ success: true as const, data: { id: "board-9" } }));
+    const upload = vi.fn(async () => ({
+      success: true as const,
+      data: { score: 6, globalRank: 3, submittedScore: 4, submittedRank: 9 },
+    }));
+    const adapter = createWavedashAdapter({
+      loadSdk: async () => fakeSdk({ getLeaderboard, uploadLeaderboardScore: upload }),
+    });
+
+    const result = await adapter.submitLeaderboardScore(request);
+
+    expect(getLeaderboard).toHaveBeenCalledWith("daily-v1-2026-10-04");
+    expect(upload).toHaveBeenCalledWith("board-9", 4, true, undefined, request.metadata);
+    expect(getLeaderboard.mock.invocationCallOrder[0]).toBeLessThan(upload.mock.invocationCallOrder[0]);
+    expect(result).toEqual({
+      status: "submitted",
+      saved: { score: 6, rank: 3 },
+      submitted: { score: 4, rank: 9 },
+    });
+  });
+
+  it("never creates a board: the adapter has no create path", async () => {
+    const sdk = { ...fakeSdk(), getOrCreateLeaderboard: vi.fn() };
+    const adapter = createWavedashAdapter({ loadSdk: async () => sdk });
+    await adapter.submitLeaderboardScore(request);
+    expect(sdk.getOrCreateLeaderboard).not.toHaveBeenCalled();
+  });
+
+  it("reports guests and signed-out players as unavailable without touching the SDK", async () => {
+    const guest = createWavedashAdapter({ loadSdk: async () => null });
+    await expect(guest.submitLeaderboardScore(request)).resolves.toEqual({
+      status: "unavailable",
+      reason: "guest",
+    });
+
+    const getLeaderboard = vi.fn();
+    const signedOut = createWavedashAdapter({
+      loadSdk: async () => fakeSdk({ getUserId: () => "", getLeaderboard }),
+    });
+    await expect(signedOut.submitLeaderboardScore(request)).resolves.toEqual({
+      status: "unavailable",
+      reason: "signed-out",
+    });
+    expect(getLeaderboard).not.toHaveBeenCalled();
+  });
+
+  it("reports a missing board, and finds it later once it exists", async () => {
+    const getLeaderboard = vi
+      .fn()
+      .mockResolvedValueOnce({ success: false, data: null, message: "Leaderboard not found" })
+      .mockResolvedValue({ success: true, data: { id: "board-1" } });
+    const adapter = createWavedashAdapter({ loadSdk: async () => fakeSdk({ getLeaderboard }) });
+
+    await expect(adapter.submitLeaderboardScore(request)).resolves.toEqual({
+      status: "unavailable",
+      reason: "board-missing",
+    });
+    await expect(adapter.submitLeaderboardScore(request)).resolves.toMatchObject({ status: "submitted" });
+  });
+
+  it("treats lookup, upload and thrown errors as failed, never submitted", async () => {
+    const lookup = createWavedashAdapter({
+      loadSdk: async () =>
+        fakeSdk({ getLeaderboard: async () => ({ success: false, data: null, message: "network down" }) }),
+    });
+    await expect(lookup.submitLeaderboardScore(request)).resolves.toEqual({
+      status: "failed",
+      message: "network down",
+    });
+
+    const upload = createWavedashAdapter({
+      loadSdk: async () =>
+        fakeSdk({ uploadLeaderboardScore: async () => ({ success: false, data: null, message: "too big" }) }),
+    });
+    await expect(upload.submitLeaderboardScore(request)).resolves.toEqual({ status: "failed", message: "too big" });
+
+    const thrown = createWavedashAdapter({
+      loadSdk: async () =>
+        fakeSdk({
+          getLeaderboard: async () => {
+            throw new Error("boom");
+          },
+        }),
+    });
+    await expect(thrown.submitLeaderboardScore(request)).resolves.toEqual({ status: "failed", message: "boom" });
+  });
+
+  it("caches a resolved board id for later submissions", async () => {
+    const getLeaderboard = vi.fn(async () => ({ success: true as const, data: { id: "board-1" } }));
+    const adapter = createWavedashAdapter({ loadSdk: async () => fakeSdk({ getLeaderboard }) });
+    await adapter.submitLeaderboardScore(request);
+    await adapter.submitLeaderboardScore(request);
+    expect(getLeaderboard).toHaveBeenCalledTimes(1);
   });
 });

@@ -26,7 +26,50 @@ export interface WavedashSdkLike {
   storeStats(): boolean;
   addEventListener(type: string, listener: EventListenerOrEventListenerObject | null): void;
   removeEventListener(type: string, listener: EventListenerOrEventListenerObject | null): void;
+  /** Resolves an existing board by name; never creates one. */
+  getLeaderboard(name: string): Promise<SdkResponse<{ id: string }>>;
+  uploadLeaderboardScore(
+    leaderboardId: never,
+    score: number,
+    keepBest: boolean,
+    ugcId?: never,
+    metadata?: Record<string, string | number | boolean>,
+  ): Promise<SdkResponse<SdkUpsertedEntry>>;
 }
+
+type SdkResponse<T> = { success: true; data: T } | { success: false; data: null; message: string };
+
+interface SdkUpsertedEntry {
+  /** Saved standing: the better of the old and new score under keepBest. */
+  score: number;
+  globalRank: number;
+  /** This submission, even when keepBest kept an earlier run. */
+  submittedScore: number;
+  submittedRank: number;
+}
+
+/** Why a score could not be sent to Wavedash. */
+export type LeaderboardUnavailableReason =
+  | "guest"
+  | "signed-out"
+  | "sdk-error"
+  | "board-missing"; // no board with that name exists (not provisioned)
+
+export interface LeaderboardSubmitRequest {
+  /** Board name; resolved to an ID before submitting. */
+  name: string;
+  score: number;
+  metadata: Record<string, string | number | boolean>;
+}
+
+export type LeaderboardSubmitResult =
+  | {
+      status: "submitted";
+      saved: { score: number; rank: number };
+      submitted: { score: number; rank: number };
+    }
+  | { status: "unavailable"; reason: LeaderboardUnavailableReason }
+  | { status: "failed"; message: string };
 
 /** Why a progress write did not reach Wavedash. */
 export type ProgressUnavailableReason =
@@ -67,6 +110,11 @@ export interface WavedashAdapter {
    * non-"stored" result; an identical write that is already stored is a no-op.
    */
   commitProgress(request: ProgressRequest): Promise<ProgressCommitResult>;
+  /**
+   * Resolves the named board (never creating it), then submits with keepBest.
+   * Resolves `submitted` only when Wavedash returned the entry. Never rejects.
+   */
+  submitLeaderboardScore(request: LeaderboardSubmitRequest): Promise<LeaderboardSubmitResult>;
 }
 
 export interface WavedashAdapterOptions {
@@ -218,6 +266,48 @@ export function createWavedashAdapter(
     }
   }
 
+  /** Board IDs resolved this session; failures are never cached, so a board opened later is found. */
+  const boardIds = new Map<string, string>();
+
+  async function submit(request: LeaderboardSubmitRequest): Promise<LeaderboardSubmitResult> {
+    const platformStatus = await adapter.initialize();
+    if (platformStatus === "guest") return { status: "unavailable", reason: "guest" };
+    if (platformStatus !== "wavedash" || !sdk) return { status: "unavailable", reason: "sdk-error" };
+    if (!adapter.getIdentity().signedIn) return { status: "unavailable", reason: "signed-out" };
+
+    try {
+      let boardId = boardIds.get(request.name);
+      if (!boardId) {
+        const board = await sdk.getLeaderboard(request.name);
+        if (!board.success) {
+          return /not.?found|does not exist|no leaderboard/i.test(board.message)
+            ? { status: "unavailable", reason: "board-missing" }
+            : { status: "failed", message: board.message };
+        }
+        boardId = board.data.id;
+        boardIds.set(request.name, boardId);
+      }
+
+      const entry = await sdk.uploadLeaderboardScore(
+        boardId as never,
+        request.score,
+        true,
+        undefined,
+        request.metadata,
+      );
+      if (!entry.success) return { status: "failed", message: entry.message };
+
+      const { score, globalRank, submittedScore, submittedRank } = entry.data;
+      return {
+        status: "submitted",
+        saved: { score, rank: globalRank },
+        submitted: { score: submittedScore, rank: submittedRank },
+      };
+    } catch (error) {
+      return { status: "failed", message: error instanceof Error ? error.message : String(error) };
+    }
+  }
+
   async function start(): Promise<PlatformStatus> {
     try {
       const loaded = await loadSdk();
@@ -246,6 +336,7 @@ export function createWavedashAdapter(
       committing = result.catch(() => undefined);
       return result;
     },
+    submitLeaderboardScore: submit,
     initialize() {
       starting ??= start();
       return starting;

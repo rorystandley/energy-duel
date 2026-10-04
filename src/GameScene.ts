@@ -37,6 +37,8 @@ import {
   utcDateString,
 } from "./game/daily";
 import type { DailyHistory, DailyRankSummary } from "./game/daily";
+import type { DailySubmission } from "./game/daily-leaderboard";
+import { DailyLeaderboardSubmitter } from "./game/daily-leaderboard";
 import { MasteryTracker } from "./game/mastery";
 import type { AchievementId } from "./game/mastery";
 import { wavedash } from "./platform/wavedash";
@@ -184,6 +186,7 @@ export class GameScene extends Phaser.Scene {
   /** Increments per match started, so a rematch on the same seed still counts as its own match. */
   private matchSerial = 0;
   private mastery!: MasteryTracker;
+  private dailyBoard!: DailyLeaderboardSubmitter;
   /** Achievements unlocked by the match now on the end screen. */
   private matchUnlocks: AchievementId[] = [];
   private backdrop?: Phaser.GameObjects.Graphics;
@@ -198,6 +201,14 @@ export class GameScene extends Phaser.Scene {
       sink: wavedash,
       storage: this.safeStorage(),
       onSyncState: () => {
+        if (this.match.status === "match-complete" && !this.replayView) {
+          this.render();
+        }
+      },
+    });
+    this.dailyBoard = new DailyLeaderboardSubmitter({
+      sink: wavedash,
+      onChange: () => {
         if (this.match.status === "match-complete" && !this.replayView) {
           this.render();
         }
@@ -519,11 +530,13 @@ export class GameScene extends Phaser.Scene {
   private dailyOverlayOptions(): {
     dailyRank: DailyRankSummary | null;
     dailyStatus: ReturnType<typeof dailyBoardStatus>;
+    dailyOnline: DailySubmission | null;
     mastery: { unlocked: AchievementId[]; sync: MasteryTracker["syncState"] };
   } {
     return {
       dailyRank: this.dailyRank,
       dailyStatus: dailyBoardStatus(this.match),
+      dailyOnline: this.dailyBoard.get(this.matchSerial),
       mastery: { unlocked: this.matchUnlocks, sync: this.mastery.syncState },
     };
   }
@@ -753,6 +766,8 @@ export class GameScene extends Phaser.Scene {
 
     if (this.match.status === "match-complete" && this.match.mode === "daily") {
       this.completeDailyAttempt();
+      // Once per finished attempt; matchSerial is stable across renders and replays.
+      void this.dailyBoard.submit(this.matchSerial, this.match);
     }
 
     if (this.match.status === "match-complete") {
