@@ -77,6 +77,31 @@ export function createRestartMatch(
   return createInitialMatch("standard", options);
 }
 
+/** Same board seed and mode as `match`, with every score and choice reset. */
+export function createRematchMatch(match: MatchState): MatchState {
+  return createInitialMatch(match.mode, { seed: match.seed });
+}
+
+/** A fresh-seed match (guided intros become Standard), guaranteed to differ from `match`'s seed. */
+export function createNewBoardMatch(
+  match: MatchState,
+  nextSeed: () => number = createMatchSeed,
+): MatchState {
+  let seed = nextSeed();
+
+  for (let attempt = 0; attempt < 8 && seed === match.seed; attempt += 1) {
+    seed = nextSeed();
+  }
+
+  if (seed === match.seed) {
+    seed = deriveSeed(match.seed, "new-board");
+  }
+
+  return createInitialMatch(match.mode === "guided" ? "standard" : match.mode, {
+    seed,
+  });
+}
+
 export function createRoundState(
   round: number,
   options: RoundSetupOptions = {},

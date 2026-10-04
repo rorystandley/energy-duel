@@ -1,6 +1,6 @@
 # Replay format and determinism
 
-A match is reproducible from `seed`, `rulesVersion`, `mode` and the player's committed queue for each round. No replay UI exists yet; the scene records `ReplayRecord` objects (`src/game/replay.ts`) for it to read later.
+A match is reproducible from `seed`, `rulesVersion`, `mode` and the player's committed queue for each round. The scene records a `ReplayRecord` (`src/game/replay.ts`) per match; the local viewer (`src/game/replay-viewer.ts`) plays rounds back read-only from it.
 
 ## Where randomness comes from
 
@@ -48,4 +48,10 @@ Each round stores the board and pickups as they stood at lock time, both queues,
 
 ## Out of scope
 
-Replay playback UI, same-seed rematch, Daily Duel and Wavedash score or UGC submission.
+Daily Duel and Wavedash score or UGC submission.
+
+## Viewer and rematch
+
+- `buildReplayFrame` derives a board frame from the record and returns copies, so the viewer cannot alter the live match or the record (tested against frozen data).
+- `createRematchMatch` reuses the seed (same round-1 board, new choices); `createNewBoardMatch` always picks a different seed.
+- The share text is a client-side result and says so; it is not a verified record.

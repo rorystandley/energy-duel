@@ -197,8 +197,11 @@ export function verifyReplay(replay: ReplayRecord): ReplayVerification {
 export interface SimulateMatchOptions {
   seed: number;
   mode?: MatchMode;
-  /** One committed queue per round, in order; may stop short of the full match. */
-  playerQueues: Move[][];
+  /**
+   * One committed queue per round, in order (may stop short of the full match),
+   * or a policy asked for each round's queue until the match finishes.
+   */
+  playerQueues: Move[][] | ((lockedAt: RoundState) => Move[]);
 }
 
 /**
@@ -210,7 +213,15 @@ export function simulateMatch(options: SimulateMatchOptions): ReplayRecord {
   let replay = createReplay(match);
   let round = createRoundState(1, { mode: match.mode, seed: match.seed });
 
-  for (const queue of options.playerQueues) {
+  for (let index = 0; ; index += 1) {
+    const queue = Array.isArray(options.playerQueues)
+      ? options.playerQueues[index]
+      : options.playerQueues(clone(round));
+
+    if (!queue) {
+      break;
+    }
+
     const locked = lockRoundQueues({ ...round, playerQueue: queue.slice() });
     const resolution = resolveRound(locked);
 
