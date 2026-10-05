@@ -41,7 +41,17 @@ export interface WavedashSdkLike {
   uploadRemoteFile(filePath: string): Promise<SdkResponse<string>>;
   downloadRemoteFile(filePath: string): Promise<SdkResponse<string>>;
   remoteFileExists(filePath: string): Promise<SdkResponse<boolean>>;
+  /** Asks the Wavedash host page to enter or exit fullscreen; entering needs a fresh user gesture. */
+  isFullscreen(): boolean;
+  requestFullscreen(fullscreen: boolean): Promise<boolean>;
 }
+
+/** Outcome of asking the Wavedash host to change fullscreen. */
+export type HostFullscreenResult =
+  | { status: "done" }
+  | { status: "unavailable" } // no host SDK (local or itch.io play), or it has not loaded yet
+  | { status: "rejected" } // the host answered no, e.g. the browser refused the request
+  | { status: "failed"; message: string };
 
 type SdkResponse<T> = { success: true; data: T } | { success: false; data: null; message: string };
 
@@ -142,6 +152,17 @@ export interface WavedashAdapter {
   readCloudFile(path: string): Promise<CloudFileReadResult>;
   /** Writes a text file and resolves `stored` only once the upload succeeded. Never rejects. */
   writeCloudFile(path: string, text: string): Promise<CloudFileWriteResult>;
+  /** True once the host SDK is loaded, so a fullscreen request can be made inside a gesture. */
+  readonly hostFullscreenAvailable: boolean;
+  isHostFullscreen(): boolean;
+  /**
+   * Must be called synchronously from a user gesture: the SDK request is issued
+   * before any await so the browser's transient activation is still live.
+   * Never rejects.
+   */
+  requestHostFullscreen(enter: boolean): Promise<HostFullscreenResult>;
+  /** Host-driven fullscreen flips (including the platform's own page control). Returns an unsubscribe. */
+  onHostFullscreenChanged(listener: (isFullscreen: boolean) => void): () => void;
 }
 
 export interface WavedashAdapterOptions {
@@ -155,6 +176,7 @@ export interface WavedashAdapterOptions {
 }
 
 const STATS_STORED_EVENT = "StatsStored";
+const FULLSCREEN_CHANGED_EVENT = "FullscreenChanged";
 
 const GUEST_IDENTITY: PlatformIdentity = {
   signedIn: false,
@@ -429,6 +451,38 @@ export function createWavedashAdapter(
       return result;
     },
     submitLeaderboardScore: submit,
+    get hostFullscreenAvailable() {
+      return sdk !== null;
+    },
+    isHostFullscreen() {
+      try {
+        return sdk?.isFullscreen() ?? false;
+      } catch {
+        return false;
+      }
+    },
+    requestHostFullscreen(enter) {
+      if (!sdk) return Promise.resolve({ status: "unavailable" });
+      try {
+        // No await before this call: it has to run inside the click's activation window.
+        return sdk.requestFullscreen(enter).then(
+          (ok): HostFullscreenResult => (ok ? { status: "done" } : { status: "rejected" }),
+          (error): HostFullscreenResult => ({ status: "failed", message: errorMessage(error) }),
+        );
+      } catch (error) {
+        return Promise.resolve({ status: "failed", message: errorMessage(error) });
+      }
+    },
+    onHostFullscreenChanged(listener) {
+      const current = sdk;
+      if (!current) return () => {};
+      const handler: EventListener = (event) => {
+        const detail = (event as CustomEvent<{ isFullscreen?: boolean }>).detail;
+        listener(Boolean(detail?.isFullscreen));
+      };
+      current.addEventListener(FULLSCREEN_CHANGED_EVENT, handler);
+      return () => current.removeEventListener(FULLSCREEN_CHANGED_EVENT, handler);
+    },
     readCloudFile,
     writeCloudFile,
     initialize() {
