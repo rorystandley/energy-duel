@@ -42,6 +42,7 @@ import type { DailySubmission } from "./game/daily-leaderboard";
 import { DailyLeaderboardSubmitter } from "./game/daily-leaderboard";
 import { MasteryTracker } from "./game/mastery";
 import type { AchievementId } from "./game/mastery";
+import { createFullscreenController } from "./platform/fullscreen";
 import { wavedash } from "./platform/wavedash";
 import { findDebugReplay } from "./game/debug-match";
 import { deriveMatchStats, getPickupCollector } from "./game/match-story";
@@ -169,6 +170,10 @@ export class GameScene extends Phaser.Scene {
   private firstRevealLogged = false;
   private lastCollisionWinner: RobotId | null = null;
   private layout: GameLayout = computeLayout(GAME_WIDTH, GAME_HEIGHT);
+  private readonly fullscreen = createFullscreenController(wavedash);
+  /** Briefly shown on the fullscreen button after the browser or host refused a request. */
+  private fullscreenRefused = false;
+  private fullscreenRefusedTimer: Phaser.Time.TimerEvent | null = null;
   private boardLayer?: Phaser.GameObjects.Container;
   private activeLayer?: Phaser.GameObjects.Container;
   private compactPanel: "audio" | null = null;
@@ -257,7 +262,17 @@ export class GameScene extends Phaser.Scene {
       if (document.visibilityState === "hidden") void this.saves.flush();
     };
     document.addEventListener("visibilitychange", flushOnHide);
+    // Subscribed once the host SDK is loaded, so the platform's own page control is mirrored too.
+    let unsubscribeFullscreen: (() => void) | null = null;
+    let shutDown = false;
+    void wavedash.initialize().then(() => {
+      if (!shutDown) {
+        unsubscribeFullscreen = this.fullscreen.subscribe(() => this.handleFullscreenChanged());
+      }
+    });
     this.events.once("shutdown", () => {
+      shutDown = true;
+      unsubscribeFullscreen?.();
       document.removeEventListener("visibilitychange", flushOnHide);
       this.scale.off("resize", this.handleResize, this);
       this.audio.destroy();
@@ -284,6 +299,57 @@ export class GameScene extends Phaser.Scene {
       this.compact ? height / 2 : GAME_HEIGHT / 2,
     );
     this.drawBackdrop();
+  }
+
+  private toggleFullscreen(): void {
+    // Straight from the click handler: the host and browser both require a live user gesture.
+    void this.fullscreen.toggle().then((result) => {
+      if (result.status === "rejected") {
+        this.fullscreenRefused = true;
+        this.fullscreenRefusedTimer?.remove();
+        this.fullscreenRefusedTimer = this.time.delayedCall(2500, () => {
+          this.fullscreenRefused = false;
+          this.renderIfNotExecuting();
+        });
+      } else {
+        this.fullscreenRefused = false;
+      }
+      this.renderIfNotExecuting();
+    });
+  }
+
+  private handleFullscreenChanged(): void {
+    // The viewport resizes around this event; re-measure so the board and hit areas follow it.
+    this.fullscreenRefused = false;
+    this.scale.refresh();
+    this.renderIfNotExecuting();
+  }
+
+  private fullscreenLabel(): string {
+    if (this.fullscreenRefused) {
+      return "TRY AGAIN";
+    }
+
+    return this.fullscreen.isFullscreen() ? "EXIT FULLSCREEN" : "FULLSCREEN";
+  }
+
+  /** Fullscreen button for the desktop composition, inside the top of the right panel. */
+  private drawFullscreenButton(): void {
+    if (!this.fullscreen.isSupported()) {
+      return;
+    }
+
+    this.drawButton(
+      RIGHT_PANEL_X,
+      40,
+      SIDE_PANEL_WIDTH,
+      30,
+      this.fullscreenLabel(),
+      true,
+      () => this.toggleFullscreen(),
+      0.2,
+      "12px",
+    );
   }
 
   private handleResize(): void {
@@ -2553,6 +2619,7 @@ export class GameScene extends Phaser.Scene {
     this.drawGameTitle();
     this.drawMatchReadout();
     this.drawAudioSettings();
+    this.drawFullscreenButton();
     this.drawRulesAccess();
 
     if (this.replayFrame) {
@@ -4866,7 +4933,8 @@ export class GameScene extends Phaser.Scene {
     const settings = this.audio.getSettings();
     const depth = 12;
     const width = Math.min(c.width - 24, 360);
-    const height = 288;
+    const showFullscreen = this.fullscreen.isSupported();
+    const height = showFullscreen ? 348 : 288;
     const x = (c.width - width) / 2;
     const y = Math.max(8, (c.height - height) / 2);
     const inner = width - 32;
@@ -4925,6 +4993,19 @@ export class GameScene extends Phaser.Scene {
       depth + 0.2,
       44,
     );
+    if (showFullscreen) {
+      this.drawButton(
+        x + 16,
+        y + height - 124,
+        inner,
+        48,
+        this.fullscreenLabel(),
+        true,
+        () => this.toggleFullscreen(),
+        depth + 0.2,
+        "15px",
+      );
+    }
     this.drawButton(
       x + 16,
       y + height - 64,
