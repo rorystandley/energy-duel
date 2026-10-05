@@ -27,14 +27,28 @@ Collect energy nodes, dodge collisions, and outscore your opponent across 5 roun
 | Action | Keys |
 |---|---|
 | Queue a move | Arrow keys / WASD |
-| Execute moves | Space |
+| Queue WAIT | Space |
+| Undo last move | Backspace |
+| Clear queue | C / Delete |
+| Execute moves | Enter |
+| Rules guide | H |
 
-- Queue up to **8 moves** per round
+On phones and tablets, use the on-screen UP / LEFT / WAIT / RIGHT / DOWN, UNDO, CLEAR and EXECUTE buttons.
+
+Other shortcuts: **P** watches a replay, **R** rematches the same board, **N** starts a new board, **T** starts the Daily Duel, **K** skips the guided intro.
+
+- Queue up to **8 moves** per round (the guided intro asks for 4 in round one)
 - Both robots reveal and execute moves at the same time
-- Collect **energy nodes** to score points
-- Collisions cause a clash — positioning matters
+- Collect **energy nodes** to score points: small nodes are worth 1, large nodes 3
+- Collisions cause a clash; collision priority swaps each round, and the loser is stunned (its next move becomes WAIT)
 - New blockers appear each round
 - **Highest score after 5 rounds wins**
+
+### Modes
+
+- **Guided duel** — a two-round introduction for new players (skippable)
+- **Standard Match** — five rounds against the rival
+- **Daily Duel** — one shared board per UTC date, ranked locally and, when that day's board is open, on a casual Wavedash leaderboard
 
 ---
 
