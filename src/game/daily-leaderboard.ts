@@ -3,31 +3,26 @@ import type {
   LeaderboardSubmitResult,
   LeaderboardUnavailableReason,
 } from "../platform/wavedash";
-import { isValidDailyDate } from "./daily";
 import type { MatchState } from "./types";
 
 /**
  * Daily Duel online ranking (docs/DAILY_LEADERBOARD.md).
  *
- * One Wavedash board per UTC date and rules version, named
- * `daily-v<rulesVersion>-<YYYY-MM-DD>`: descending score, score = player minus
- * rival, keepBest. Rankings are client-reported and therefore casual, not
+ * One permanent Wavedash board, `daily-duel`: descending score, score = player
+ * minus rival, keepBest. Each player's entry is their best Daily Duel margin on
+ * any day. Rankings are client-reported and therefore casual, not
  * cheat-resistant.
  *
- * The client only ever *resolves* a board by name. It never creates one: boards
- * created by ordinary players default to Hidden, so a client-created daily board
- * would silently have no public leaderboard. Boards are provisioned by the
- * operator (scripts/provision-daily-leaderboards.mjs).
+ * The client only ever *resolves* the board by name. It never creates it: boards
+ * created by ordinary players default to Hidden, so a client-created board would
+ * silently have no public leaderboard. The owner creates it once and makes it
+ * public (scripts/provision-daily-leaderboards.mjs).
  */
 
-export const DAILY_LEADERBOARD_PREFIX = "daily";
+export const DAILY_LEADERBOARD_NAME = "daily-duel";
 
-export function dailyLeaderboardName(date: string, rulesVersion: number): string {
-  if (!isValidDailyDate(date) || !Number.isInteger(rulesVersion) || rulesVersion < 1) {
-    throw new Error(`Invalid Daily Duel board: ${date} v${rulesVersion}`);
-  }
-
-  return `${DAILY_LEADERBOARD_PREFIX}-v${rulesVersion}-${date}`;
+export function dailyLeaderboardName(): string {
+  return DAILY_LEADERBOARD_NAME;
 }
 
 /** The leaderboard score: player minus rival, so higher is better and ties are equal scores. */
@@ -57,7 +52,7 @@ export function createDailySubmission(match: MatchState): LeaderboardSubmitReque
   };
 
   return {
-    name: dailyLeaderboardName(match.dailyDate, match.rulesVersion),
+    name: dailyLeaderboardName(),
     score: dailyLeaderboardScore(match.playerScore, match.rivalScore),
     metadata: { ...metadata },
   };

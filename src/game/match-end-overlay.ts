@@ -236,7 +236,7 @@ function describeOnlineRows(online: DailySubmission | null | undefined): MatchCo
         { label: "ONLINE RANK", value: "NOT SUBMITTED - SIGN IN ON WAVEDASH", tone: "neutral" },
       ];
     case "board-missing":
-      return [{ label: "ONLINE RANK", value: "TODAY'S ONLINE BOARD IS NOT OPEN YET", tone: "neutral" }];
+      return [{ label: "ONLINE RANK", value: "ONLINE BOARD IS NOT OPEN YET", tone: "neutral" }];
     case "failed":
       return [{ label: "ONLINE RANK", value: "SUBMIT FAILED - NOT RANKED", tone: "neutral" }];
     case "submitted": {

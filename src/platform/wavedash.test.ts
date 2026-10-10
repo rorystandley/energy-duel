@@ -271,7 +271,7 @@ describe("wavedash adapter progress", () => {
 
 describe("wavedash leaderboard submission", () => {
   const request = {
-    name: "daily-v1-2026-10-04",
+    name: "daily-duel",
     score: 4,
     metadata: { date: "2026-10-04", rulesVersion: 1, playerScore: 12, rivalScore: 8 },
   };
@@ -288,7 +288,7 @@ describe("wavedash leaderboard submission", () => {
 
     const result = await adapter.submitLeaderboardScore(request);
 
-    expect(getLeaderboard).toHaveBeenCalledWith("daily-v1-2026-10-04");
+    expect(getLeaderboard).toHaveBeenCalledWith("daily-duel");
     expect(upload).toHaveBeenCalledWith("board-9", 4, true, undefined, request.metadata);
     expect(getLeaderboard.mock.invocationCallOrder[0]).toBeLessThan(upload.mock.invocationCallOrder[0]);
     expect(result).toEqual({

@@ -35,26 +35,14 @@ describe("daily leaderboard naming and score", () => {
     expect(dailyLeaderboardScore(9, 9)).toBe(0);
   });
 
-  it("uses one board per UTC date and rules version", () => {
-    const names = new Set([
-      dailyLeaderboardName("2026-10-04", 1),
-      dailyLeaderboardName("2026-10-05", 1),
-      dailyLeaderboardName("2026-10-04", 2),
-    ]);
-    expect(names.size).toBe(3);
-    expect(dailyLeaderboardName("2026-10-04", 2)).toBe("daily-v2-2026-10-04");
-  });
-
-  it("rejects malformed boards instead of inventing a name", () => {
-    expect(() => dailyLeaderboardName("2026-13-40", 1)).toThrow();
-    expect(() => dailyLeaderboardName("2026-10-04", 0)).toThrow();
-    expect(() => dailyLeaderboardName("2026-10-04", 1.5)).toThrow();
+  it("uses one permanent board regardless of date or rules version", () => {
+    expect(dailyLeaderboardName()).toBe("daily-duel");
   });
 
   it("builds a compact submission from the match's own date and rules version", () => {
     const request = createDailySubmission(finished("2026-10-04", 12, 8, 3))!;
     expect(request).toEqual({
-      name: "daily-v3-2026-10-04",
+      name: "daily-duel",
       score: 4,
       metadata: { date: "2026-10-04", rulesVersion: 3, playerScore: 12, rivalScore: 8 },
     });
@@ -64,7 +52,7 @@ describe("daily leaderboard naming and score", () => {
   it("keeps a run that outlives midnight on its starting date", () => {
     vi.useFakeTimers({ now: new Date("2026-10-05T00:30:00Z") });
     try {
-      expect(createDailySubmission(finished("2026-10-04", 5, 3))!.name).toMatch(/2026-10-04$/);
+      expect(createDailySubmission(finished("2026-10-04", 5, 3))!.metadata).toMatchObject({ date: "2026-10-04" });
     } finally {
       vi.useRealTimers();
     }
@@ -101,7 +89,7 @@ describe("DailyLeaderboardSubmitter", () => {
     expect(submitter.get(1)?.state).toBe("submitted");
   });
 
-  it("submits separate attempts separately, on their own boards", async () => {
+  it("submits separate attempts separately, all to the one board", async () => {
     const sink = {
       submitLeaderboardScore: vi.fn(async (_request: LeaderboardSubmitRequest) => submitted(1, 1)),
     };
@@ -112,7 +100,7 @@ describe("DailyLeaderboardSubmitter", () => {
     await submitter.submit(3, finished("2026-10-05", 5, 4, 2));
 
     const names = sink.submitLeaderboardScore.mock.calls.map(([r]) => r.name);
-    expect(names).toEqual(["daily-v1-2026-10-04", "daily-v1-2026-10-05", "daily-v2-2026-10-05"]);
+    expect(names).toEqual(["daily-duel", "daily-duel", "daily-duel"]);
   });
 
   it("keeps the saved best and this attempt apart", async () => {
@@ -156,7 +144,7 @@ describe("DailyLeaderboardSubmitter", () => {
       }),
     };
     const result = await new DailyLeaderboardSubmitter({ sink }).submit(1, finished("2026-10-04", 5, 4));
-    expect(result).toMatchObject({ state: "board-missing", boardName: "daily-v1-2026-10-04" });
+    expect(result).toMatchObject({ state: "board-missing", boardName: "daily-duel" });
     expect(result?.best).toBeUndefined();
   });
 
@@ -214,7 +202,7 @@ describe("end screen online rank", () => {
   it("separates the submitted attempt from the saved best and labels it casual", () => {
     const result = rows({
       state: "submitted",
-      boardName: "daily-v1-2026-10-04",
+      boardName: "daily-duel",
       attempt: { score: -2, rank: 40 },
       best: { score: 5, rank: 7 },
     });
@@ -228,10 +216,10 @@ describe("end screen online rank", () => {
   it.each([
     ["pending", "SUBMITTING..."],
     ["local", "NOT SUBMITTED - SIGN IN ON WAVEDASH"],
-    ["board-missing", "TODAY'S ONLINE BOARD IS NOT OPEN YET"],
+    ["board-missing", "ONLINE BOARD IS NOT OPEN YET"],
     ["failed", "SUBMIT FAILED - NOT RANKED"],
   ] as const)("never shows a rank for %s", (state, text) => {
-    const result = rows({ state, boardName: "daily-v1-2026-10-04" });
+    const result = rows({ state, boardName: "daily-duel" });
     expect(result).toEqual([{ label: "ONLINE RANK", value: text, tone: "neutral" }]);
   });
 });
